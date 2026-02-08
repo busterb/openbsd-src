@@ -119,9 +119,15 @@ HOSTED_CPPFLAGS=${CPPFLAGS:S/^-nostdinc$//}
 HOSTED_CFLAGS=	${CFLAGS}
 HOSTED_C=	${HOSTCC} ${HOSTED_CFLAGS} ${HOSTED_CPPFLAGS} -c $<
 
-NORMAL_C_NOP=	${CC} ${CFLAGS} ${CPPFLAGS} -fno-ret-protector -c $<
-NORMAL_C=	${CC} ${CFLAGS} ${CPPFLAGS} ${PROF} -c $<
-NORMAL_S=	${CC} ${AFLAGS} ${CPPFLAGS} ${PROF} -c $<
+.ifdef QUIET
+NORMAL_C_NOP=   @echo "  cc $<" && ${CC} ${CFLAGS} ${CPPFLAGS} -fno-ret-protector -c $<
+NORMAL_C=   @echo "  cc $<" && ${CC} ${CFLAGS} ${CPPFLAGS} ${PROF} -c $<
+NORMAL_S=   @echo "  as $<" && ${CC} ${AFLAGS} ${CPPFLAGS} ${PROF} -c $<
+.else
+NORMAL_C_NOP=   ${CC} ${CFLAGS} ${CPPFLAGS} -fno-ret-protector -c $<
+NORMAL_C=   ${CC} ${CFLAGS} ${CPPFLAGS} ${PROF} -c $<
+NORMAL_S=   ${CC} ${AFLAGS} ${CPPFLAGS} ${PROF} -c $<
+.endif
 
 %OBJS
 
