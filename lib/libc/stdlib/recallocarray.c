@@ -58,7 +58,7 @@ recallocarray(void *ptr, size_t oldnmemb, size_t newnmemb, size_t size)
 		size_t d = oldsize - newsize;
 
 		if (d < oldsize / 2 && d < (size_t)getpagesize()) {
-			memset((char *)ptr + newsize, 0, d);
+			explicit_bzero((char *)ptr + newsize, d);
 			return ptr;
 		}
 	}
