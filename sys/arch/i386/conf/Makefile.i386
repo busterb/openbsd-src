@@ -68,9 +68,15 @@ HOSTED_CPPFLAGS=${CPPFLAGS:S/^-nostdinc$//}
 HOSTED_CFLAGS=	${CFLAGS}
 HOSTED_C=	${HOSTCC} ${HOSTED_CFLAGS} ${HOSTED_CPPFLAGS} -c $<
 
+.ifdef QUIET
+NORMAL_C_NOP=	@echo "  cc $<" && ${CC} ${CFLAGS} ${CPPFLAGS} -fno-stack-protector -c $<
+NORMAL_C=	@echo "  cc $<" && ${CC} ${CFLAGS} ${CPPFLAGS} ${PROF} -c $<
+NORMAL_S=	@echo "  as $<" && ${CC} ${AFLAGS} ${CPPFLAGS} ${PROF} -c $<
+.else
 NORMAL_C_NOP=	${CC} ${CFLAGS} ${CPPFLAGS} -fno-stack-protector -c $<
 NORMAL_C=	${CC} ${CFLAGS} ${CPPFLAGS} ${PROF} -c $<
 NORMAL_S=	${CC} ${AFLAGS} ${CPPFLAGS} ${PROF} -c $<
+.endif
 
 %OBJS
 
@@ -116,14 +122,27 @@ PROF=		-fsanitize-coverage=trace-pc,trace-cmp
 # good target name
 assym.h: $S/kern/genassym.sh Makefile \
 	 ${_archdir}/${_arch}/genassym.cf ${_machdir}/${_mach}/genassym.cf
+.ifdef QUIET
+	@echo "  genassym assym.h"
+	@cat ${_archdir}/${_arch}/genassym.cf ${_machdir}/${_mach}/genassym.cf | \
+	    sh $S/kern/genassym.sh ${CC} ${NO_INTEGR_AS} ${CFLAGS} ${CPPFLAGS} -MF assym.P > assym.h.tmp
+	@sed '1s/.*/assym.h: \\/' assym.P > assym.d
+	@sort -u assym.h.tmp > assym.h
+.else
 	cat ${_archdir}/${_arch}/genassym.cf ${_machdir}/${_mach}/genassym.cf | \
 	    sh $S/kern/genassym.sh ${CC} ${NO_INTEGR_AS} ${CFLAGS} ${CPPFLAGS} -MF assym.P > assym.h.tmp
 	sed '1s/.*/assym.h: \\/' assym.P > assym.d
 	sort -u assym.h.tmp > assym.h
+.endif
 
 param.c: $S/conf/param.c
+.ifdef QUIET
+	@rm -f param.c
+	@cp $S/conf/param.c .
+.else
 	rm -f param.c
 	cp $S/conf/param.c .
+.endif
 
 param.o: param.c Makefile
 	${NORMAL_C}
@@ -138,8 +157,13 @@ ld.script: ${_machdir}/conf/ld.script
 	cp ${_machdir}/conf/ld.script $@
 
 gapdummy.o:
+.ifdef QUIET
+	@echo '__asm(".section .rodata,\"a\"");' > gapdummy.c
+	@echo "  cc gapdummy.c" && ${CC} -c ${CFLAGS} ${CPPFLAGS} gapdummy.c -o $@
+.else
 	echo '__asm(".section .rodata,\"a\"");' > gapdummy.c
 	${CC} -c ${CFLAGS} ${CPPFLAGS} gapdummy.c -o $@
+.endif
 
 makegap.sh:
 	cp $S/conf/makegap.sh $@
@@ -151,7 +175,11 @@ gap.o:	Makefile makegap.sh gapdummy.o vers.o
 
 vers.o: ${SYSTEM_DEP:Ngap.o}
 	sh $S/conf/newvers.sh
+.ifdef QUIET
+	@echo "  cc vers.c" && ${CC} ${CFLAGS} ${CPPFLAGS} ${PROF} -c vers.c
+.else
 	${CC} ${CFLAGS} ${CPPFLAGS} ${PROF} -c vers.c
+.endif
 
 .if ${SYSTEM_OBJ:Mkcov.o} && ${COMPILER_VERSION:Mclang}
 kcov.o: $S/dev/kcov.c
