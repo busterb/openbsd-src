@@ -107,7 +107,7 @@
 #include <net/bpf.h>
 #endif
 
-/* #define AQ_DEBUG 1 */
+#define AQ_DEBUG 1
 #ifdef AQ_DEBUG
 #define DPRINTF(x) printf x
 #else
