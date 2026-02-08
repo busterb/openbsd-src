@@ -73,8 +73,7 @@ recallocarray(void *ptr, size_t oldnmemb, size_t newnmemb, size_t size)
 	} else
 		memcpy(newptr, ptr, newsize);
 
-	explicit_bzero(ptr, oldsize);
-	free(ptr);
+	freezero(ptr, oldsize);
 
 	return newptr;
 }
