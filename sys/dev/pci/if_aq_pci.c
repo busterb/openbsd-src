@@ -94,6 +94,9 @@
 
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
+#include <netinet/tcp.h>
+#include <netinet/tcp_timer.h>
+#include <netinet/tcp_var.h>
 
 #ifdef __HAVE_FDT
 #include <dev/ofw/openfirm.h>
@@ -362,6 +365,8 @@
 #define TPO_HWCSUM_REG				0x7800
 #define  TPO_HWCSUM_L4CSUM_EN			(1 << 0)
 #define  TPO_HWCSUM_IP4CSUM_EN			(1 << 1)
+
+#define TDM_LSO_ENABLE					0x7810
 
 #define THM_LSO_TCP_FLAG1_REG			0x7820
 #define  THM_LSO_TCP_FLAG1_FIRST		0xFFF
@@ -933,6 +938,16 @@ struct aq_tx_desc {
 	uint32_t		ctl2;
 #define AQ_TXDESC_CTL2_LEN_SHIFT 14
 #define AQ_TXDESC_CTL2_CTX_EN	(1 << 13)
+
+/* TXC context descriptor fields for LSO */
+#define AQ_TXC_CTL1_CMD_SHIFT		20
+#define AQ_TXC_CMD_LSO			0x4
+#define AQ_TXC_CMD_IPV6			0x2
+#define AQ_TXC_CTL1_L2LEN_SHIFT	24
+#define AQ_TXC_CTL1_L3LEN_LSB		(1U << 31)
+#define AQ_TXC_CTL2_L3LEN_SHIFT	0
+#define AQ_TXC_CTL2_L4LEN_SHIFT	8
+#define AQ_TXC_CTL2_MSS_SHIFT		16
 } __packed;
 
 struct aq_slot {
@@ -1382,7 +1397,7 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_hardmtu = 9000;
 	ifp->if_capabilities = IFCAP_VLAN_MTU | IFCAP_CSUM_IPv4 |
 	    IFCAP_CSUM_UDPv4 | IFCAP_CSUM_UDPv6 | IFCAP_CSUM_TCPv4 |
-	    IFCAP_CSUM_TCPv6;
+	    IFCAP_CSUM_TCPv6 | IFCAP_TSOv4 | IFCAP_TSOv6;
 #if NVLAN > 0
 	ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING;
 #endif
@@ -3260,6 +3275,8 @@ aq_start(struct ifqueue *ifq)
 	struct aq_slot *as;
 	struct mbuf *m;
 	uint32_t idx, free, used, ctl1, ctl2;
+	uint32_t txc_ctl1, txc_ctl2;
+	int need_txc;
 	int error, i;
 
 	if (!LINK_STATE_IS_UP(sc->sc_arpcom.ac_if.if_link_state)) {
@@ -3314,15 +3331,83 @@ aq_start(struct ifqueue *ifq)
 
 		ctl2 = m->m_pkthdr.len << AQ_TXDESC_CTL2_LEN_SHIFT;
 		ctl1 = AQ_TXDESC_CTL1_TYPE_TXD | AQ_TXDESC_CTL1_CMD_FCS;
+		txc_ctl1 = 0;
+		txc_ctl2 = 0;
+		need_txc = 0;
+
 #if NVLAN > 0
 		if (m->m_flags & M_VLANTAG) {
+			txc_ctl1 |= (m->m_pkthdr.ether_vtag <<
+			    AQ_TXDESC_CTL1_VLAN_SHIFT);
+			ctl1 |= AQ_TXDESC_CTL1_CMD_VLAN;
+			need_txc = 1;
+		}
+#endif
+
+		if (m->m_pkthdr.csum_flags & M_TCP_TSO) {
+			struct ether_extracted ext;
+
+			ether_extract_headers(m, &ext);
+
+			if (ext.tcp && m->m_pkthdr.ph_mss > 0) {
+				uint32_t l2len, l3len, l4len, cmd;
+				uint32_t paylen, mss;
+
+				if (ext.ip4)
+					l2len = (uint8_t *)ext.ip4 -
+					    mtod(m, uint8_t *);
+				else if (ext.ip6)
+					l2len = (uint8_t *)ext.ip6 -
+					    mtod(m, uint8_t *);
+				else {
+					tcpstat_inc(tcps_outbadtso);
+					goto notso;
+				}
+				l3len = ext.iphlen;
+				l4len = ext.tcphlen;
+				mss = m->m_pkthdr.ph_mss;
+
+				cmd = AQ_TXC_CMD_LSO;
+				if (ext.ip6 != NULL)
+					cmd |= AQ_TXC_CMD_IPV6;
+
+				txc_ctl1 |= (cmd << AQ_TXC_CTL1_CMD_SHIFT);
+				txc_ctl1 |= (l2len <<
+				    AQ_TXC_CTL1_L2LEN_SHIFT);
+				txc_ctl1 |= ((l3len & 0x1) << 31);
+
+				txc_ctl2 |= ((l3len >> 1) <<
+				    AQ_TXC_CTL2_L3LEN_SHIFT);
+				txc_ctl2 |= (l4len <<
+				    AQ_TXC_CTL2_L4LEN_SHIFT);
+				txc_ctl2 |= (mss <<
+				    AQ_TXC_CTL2_MSS_SHIFT);
+
+				ctl1 |= AQ_TXDESC_CTL1_CMD_LSO;
+				if (ext.ip4)
+					ctl1 |=
+					    AQ_TXDESC_CTL1_CMD_IP4CSUM;
+				ctl1 |= AQ_TXDESC_CTL1_CMD_L4CSUM;
+				need_txc = 1;
+
+				paylen = m->m_pkthdr.len - l2len -
+				    l3len - l4len;
+				ctl2 = paylen <<
+				    AQ_TXDESC_CTL2_LEN_SHIFT;
+				tcpstat_add(tcps_outpkttso,
+				    (paylen + mss - 1) / mss);
+			} else {
+				tcpstat_inc(tcps_outbadtso);
+			}
+		}
+ notso:
+
+		if (need_txc) {
 			txd = ring + idx;
 			txd->buf_addr = 0;
 			txd->ctl1 = htole32(AQ_TXDESC_CTL1_TYPE_TXC |
-			    (m->m_pkthdr.ether_vtag << AQ_TXDESC_CTL1_VLAN_SHIFT));
-			txd->ctl2 = 0;
-
-			ctl1 |= AQ_TXDESC_CTL1_CMD_VLAN;
+			    txc_ctl1);
+			txd->ctl2 = htole32(txc_ctl2);
 			ctl2 |= AQ_TXDESC_CTL2_CTX_EN;
 
 			idx++;
@@ -3330,12 +3415,14 @@ aq_start(struct ifqueue *ifq)
 				idx = 0;
 			used++;
 		}
-#endif
 
-		if (m->m_pkthdr.csum_flags & M_IPV4_CSUM_OUT)
-			ctl1 |= AQ_TXDESC_CTL1_CMD_IP4CSUM;
-		if (m->m_pkthdr.csum_flags & (M_TCP_CSUM_OUT | M_UDP_CSUM_OUT))
-			ctl1 |= AQ_TXDESC_CTL1_CMD_L4CSUM;
+		if (!(m->m_pkthdr.csum_flags & M_TCP_TSO)) {
+			if (m->m_pkthdr.csum_flags & M_IPV4_CSUM_OUT)
+				ctl1 |= AQ_TXDESC_CTL1_CMD_IP4CSUM;
+			if (m->m_pkthdr.csum_flags &
+			    (M_TCP_CSUM_OUT | M_UDP_CSUM_OUT))
+				ctl1 |= AQ_TXDESC_CTL1_CMD_L4CSUM;
+		}
 
 		for (i = 0; i < as->as_map->dm_nsegs; i++) {
 
@@ -3462,7 +3549,7 @@ aq_queue_up(struct aq_softc *sc, struct aq_queues *aq)
 	struct aq_rxring *rx;
 	struct aq_txring *tx;
 	struct aq_slot *as;
-	int i, mtu;
+	int i;
 
 	rx = &aq->q_rx;
 	rx->rx_slots = mallocarray(sizeof(*as), AQ_RXD_NUM, M_DEVBUF,
@@ -3500,11 +3587,11 @@ aq_queue_up(struct aq_softc *sc, struct aq_queues *aq)
 		goto destroy_rx_ring;
 	}
 
-	mtu = sc->sc_arpcom.ac_if.if_hardmtu;
 	for (i = 0; i < AQ_TXD_NUM; i++) {
 		as = &tx->tx_slots[i];
-		if (bus_dmamap_create(sc->sc_dmat, mtu, AQ_TX_MAX_SEGMENTS,
-		    MCLBYTES, 0, BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
+		if (bus_dmamap_create(sc->sc_dmat, MAXMCLBYTES,
+		    AQ_TX_MAX_SEGMENTS, MCLBYTES, 0,
+		    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
 		    &as->as_map) != 0) {
 			printf("%s: failed to allocated tx dma maps %d\n",
 			    DEVNAME(sc), aq->q_index);
@@ -3608,6 +3695,9 @@ aq_up(struct aq_softc *sc)
 
 	AQ_WRITE_REG_BIT(sc, TPO_HWCSUM_REG, TPO_HWCSUM_IP4CSUM_EN, 1);
 	AQ_WRITE_REG_BIT(sc, TPO_HWCSUM_REG, TPO_HWCSUM_L4CSUM_EN, 1);
+
+	/* Hardware LSO / Large Send Offload */
+	AQ_WRITE_REG(sc, TDM_LSO_ENABLE, 0xffffffff);
 
 	AQ_WRITE_REG_BIT(sc, RPO_HWCSUM_REG, RPO_HWCSUM_IP4CSUM_EN, 1);
 	AQ_WRITE_REG_BIT(sc, RPO_HWCSUM_REG, RPO_HWCSUM_L4CSUM_EN, 1);
