@@ -78,36 +78,57 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
-#include "bpfilter.h"
-#include "vlan.h"
+/*
+ * Driver for aQuantia/Marvell AQtion Ethernet adapters.
+ *
+ * Supports two hardware generations:
+ *   - Atlantic (AQ1): AQC100/107/108/109/111/112 and variants
+ *   - Atlantic2 (AQ2): AQC113/114/115/116 and variants
+ *
+ * These are multi-gigabit (up to 10Gbps) PCI Express NICs with:
+ *   - Multi-queue TX/RX with MSI-X support (up to 8 queues)
+ *   - RSS (Receive Side Scaling) via Toeplitz hashing
+ *   - Hardware checksum offload (IPv4, TCP, UDP)
+ *   - VLAN tag insertion/stripping
+ *   - SFP module access via SMBus (fibre variants)
+ *
+ * The driver communicates with on-chip firmware via memory-mapped
+ * registers and a mailbox interface.  AQ1 devices use firmware
+ * versions 1.x (fw1x) or 2.x/3.x (fw2x), while AQ2 devices use
+ * a separate firmware interface with shared memory regions.
+ */
+
+#include "bpfilter.h"	/* BPF (Berkeley Packet Filter) support */
+#include "vlan.h"	/* VLAN (802.1Q) support */
 
 #include <sys/types.h>
-#include <sys/device.h>
+#include <sys/device.h>	  /* OpenBSD autoconf device framework */
 #include <sys/param.h>
-#include <sys/sockio.h>
-#include <sys/systm.h>
-#include <sys/intrmap.h>
+#include <sys/sockio.h>	  /* socket ioctl definitions (SIOCSIFADDR, etc.) */
+#include <sys/systm.h>	  /* kernel utility functions (delay, printf, etc.) */
+#include <sys/intrmap.h>  /* interrupt-to-CPU mapping for multi-queue */
 
-#include <net/if.h>
-#include <net/if_media.h>
-#include <net/toeplitz.h>
+#include <net/if.h>	  /* struct ifnet - network interface abstraction */
+#include <net/if_media.h> /* ifmedia - link speed/duplex negotiation */
+#include <net/toeplitz.h> /* Toeplitz hash for RSS key generation */
 
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
 #include <netinet/tcp.h>
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
+#include <netinet/if_ether.h>
 
 #ifdef __HAVE_FDT
-#include <dev/ofw/openfirm.h>
+#include <dev/ofw/openfirm.h>	/* Device Tree support for MAC addr on ARM */
 #endif
 
-#include <dev/pci/pcireg.h>
-#include <dev/pci/pcivar.h>
-#include <dev/pci/pcidevs.h>
+#include <dev/pci/pcireg.h>	/* PCI register definitions */
+#include <dev/pci/pcivar.h>	/* PCI bus access functions */
+#include <dev/pci/pcidevs.h>	/* PCI vendor/product ID constants */
 
 #if NBPFILTER > 0
-#include <net/bpf.h>
+#include <net/bpf.h>		/* BPF tap for tcpdump/packet capture */
 #endif
 
 /* #define AQ_DEBUG 1 */
@@ -117,22 +138,30 @@
 #define DPRINTF(x)
 #endif /* AQ_DEBUG */
 
+/* Convenience macro: returns the autoconf device name (e.g. "aq0") */
 #define DEVNAME(_s)	((_s)->sc_dev.dv_xname)
 
-#define AQ_BAR0 				0x10
-#define AQ_MAXQ 				8
-#define AQ_RSS_KEYSIZE				40
-#define AQ_RSS_REDIR_ENTRIES			12
+/*
+ * Basic hardware constants.
+ */
+#define AQ_BAR0 				0x10	/* PCI BAR for MMIO */
+#define AQ_MAXQ 				8	/* max HW queues */
+#define AQ_RSS_KEYSIZE				40	/* RSS key: 40 bytes */
+#define AQ_RSS_REDIR_ENTRIES			12	/* RSS redir table regs */
 
-#define AQ_TXD_NUM 				2048
-#define AQ_RXD_NUM 				2048
+#define AQ_TXD_NUM 				2048	/* TX descriptors/ring */
+#define AQ_RXD_NUM 				2048	/* RX descriptors/ring */
 
-#define AQ_TX_MAX_SEGMENTS			32
+#define AQ_TX_MAX_SEGMENTS			32	/* max DMA segs per TX */
 
-#define AQ_LINKSTAT_IRQ				31
+#define AQ_LINKSTAT_IRQ				31	/* link status IRQ # */
 
-#define RPF_ACTION_HOST				1
+#define RPF_ACTION_HOST				1	/* deliver to host */
 
+/*
+ * Global / firmware control registers.
+ * These are used during firmware boot, reset, and version identification.
+ */
 #define AQ_FW_SOFTRESET_REG			0x0000
 #define  AQ_FW_SOFTRESET_DIS			(1 << 14)
 #define  AQ_FW_SOFTRESET_RESET			(1 << 15)
@@ -151,6 +180,13 @@
 #define AQ_FW_GLB_CTL2_REG			0x0404
 #define AQ_GLB_GENERAL_PROVISIONING9_REG	0x0520
 #define AQ_GLB_NVR_PROVISIONING2_REG		0x0534
+/*
+ * Interrupt controller registers.
+ * The NIC has a 32-bit interrupt status register with one bit per source.
+ * Sources include per-queue TX/RX completion and link status change.
+ * The automask register causes hardware to auto-clear interrupt bits
+ * on read, avoiding a separate write to acknowledge.
+ */
 #define AQ_INTR_STATUS_REG			0x2000  /* intr status */
 #define AQ_INTR_STATUS_CLR_REG			0x2050  /* intr status clear */
 #define AQ_INTR_MASK_REG			0x2060	/* intr mask set */
@@ -166,7 +202,11 @@
 #define  AQ_SMB_BUS_RX_ACK			(1 << 8)
 #define AQ_SMB_RX_DATA_REG			0x0748
 
-/* AQ_INTR_IRQ_MAP_TXRX_REG 0x2100-0x2140 */
+/*
+ * Interrupt-to-IRQ mapping registers (0x2100-0x2140).
+ * These map each TX/RX queue's completion event to a specific MSI-X
+ * vector number.  Two queues are packed into each 32-bit register.
+ */
 #define AQ_INTR_IRQ_MAP_TXRX_REG(i)		(0x2100 + ((i) / 2) * 4)
 #define AQ_INTR_IRQ_MAP_TX_REG(i)		AQ_INTR_IRQ_MAP_TXRX_REG(i)
 #define  AQ_INTR_IRQ_MAP_TX_IRQMAP(i)		(0x1FU << (((i) & 1) ? 16 : 24))
@@ -214,6 +254,13 @@
 #define FW_MPI_RESETCTRL_REG			0x4000
 #define  FW_MPI_RESETCTRL_RESET_DIS		(1 << 29)
 
+/*
+ * Receive path registers (0x5000-0x6fff).
+ * RPF = Receive Packet Filter (L2/L3/L4 filtering, RSS, VLAN)
+ * RPB = Receive Packet Buffer (on-chip RX FIFO)
+ * RPO = Receive Packet Offload (checksum offload)
+ * RX DMA = DMA engine registers for RX descriptor rings
+ */
 #define RX_SYSCONTROL_REG			0x5000
 #define  RX_SYSCONTROL_RESET_DIS		(1 << 29)
 
@@ -351,6 +398,15 @@
 #define  RX_DMA_DCA_EN				(1U << 31)
 #define  RX_DMA_DCA_MODE			0xF
 
+/*
+ * Transmit path registers (0x7000-0x8fff).
+ * TPS = TX Packet Scheduler (arbitration, rate limiting, traffic classes)
+ * TPO = TX Packet Offload (checksum, LSO/TSO)
+ * TPB = TX Packet Buffer (on-chip TX FIFO)
+ * THM = TX Header Modification (LSO TCP flags)
+ * TX DMA = DMA engine registers for TX descriptor rings
+ * TDM = TX DMA (DCA = Direct Cache Access hints)
+ */
 #define TX_SYSCONTROL_REG			0x7000
 #define  TX_SYSCONTROL_RESET_DIS		(1 << 29)
 
@@ -440,7 +496,13 @@
 #define  TX_INTR_MODERATION_CTL_MIN		(0xFF << 8)
 #define  TX_INTR_MODERATION_CTL_MAX		(0x1FF << 16)
 
-/* AQ2 registers */
+/*
+ * Atlantic2 (AQ2) specific registers.
+ * AQ2 uses a different firmware interface based on shared memory regions
+ * at high register offsets (0x12000+, 0x13000+, 0x14000+).  The driver
+ * writes configuration to the "interface in" region and reads status
+ * from the "interface out" region, using transaction IDs for coherency.
+ */
 
 #define AQ2_MIF_HOST_FINISHED_STATUS_WRITE_REG	0x0e00
 #define AQ2_MIF_HOST_FINISHED_STATUS_READ_REG	0x0e04
@@ -459,7 +521,13 @@
 #define  AQ2_MIF_BOOT_FW_INIT_FAILED		(1 << 29)
 #define  AQ2_MIF_BOOT_FW_INIT_COMP_SUCCESS	(1U << 31)
 
-/* AQ2 action resolver table */
+/*
+ * AQ2 Action Resolver Table (ART).
+ * The ART is a programmable packet classification engine in AQ2 hardware.
+ * Each entry has a tag (match value), mask, and action.  Packets are
+ * matched against the table to determine whether to drop, forward to
+ * host, or assign to a specific queue/traffic class.
+ */
 #define AQ2_ART_ACTION_ACT_SHIFT		8
 #define AQ2_ART_ACTION_RSS			0x0080
 #define AQ2_ART_ACTION_INDEX_SHIFT		2
@@ -634,9 +702,19 @@
 #define AQ2_RPF_ACT_ART_REQ_MASK_REG(i)		(0x14004 + (i) * 0x10)
 #define AQ2_RPF_ACT_ART_REQ_ACTION_REG(i)	(0x14008 + (i) * 0x10)
 
+/*
+ * Bit manipulation helpers used for read-modify-write of register fields.
+ * __LOWEST_SET_BIT isolates the LSB of a bitmask, and __SHIFTIN shifts
+ * a value into the position defined by that mask.
+ */
 #define __LOWEST_SET_BIT(__mask) (((((uint32_t)__mask) - 1) & ((uint32_t)__mask)) ^ ((uint32_t)__mask))
 #define __SHIFTIN(__x, __mask) ((__x) * __LOWEST_SET_BIT(__mask))
 
+/*
+ * Register access macros.  All hardware registers are accessed through
+ * the bus_space(9) API, which provides MI (machine-independent) access
+ * to MMIO space mapped at attach time.
+ */
 #define AQ_READ_REG(sc, reg) \
 	bus_space_read_4((sc)->sc_iot, (sc)->sc_ioh, (reg))
 #define AQ_READ_REGS(sc, reg, p, cnt) \
@@ -645,6 +723,11 @@
 #define AQ_WRITE_REG(sc, reg, val) \
 	bus_space_write_4((sc)->sc_iot, (sc)->sc_ioh, (reg), (val))
 
+/*
+ * Read-modify-write a bitfield within a register.
+ * Reads the register, clears the bits in 'mask', then sets them to
+ * 'val' shifted into position.  Used extensively for register fields.
+ */
 #define AQ_WRITE_REG_BIT(sc, reg, mask, val)                    \
 	do {                                                    \
 		uint32_t _v;                                    \
@@ -655,6 +738,7 @@
 		AQ_WRITE_REG((sc), (reg), _v);                  \
 	} while (/* CONSTCOND */ 0)
 
+/* 64-bit register access (two consecutive 32-bit reads/writes) */
 #define AQ_READ64_REG(sc, reg)					\
 	((uint64_t)AQ_READ_REG(sc, reg) |			\
 	(((uint64_t)AQ_READ_REG(sc, (reg) + 4)) << 32))
@@ -665,6 +749,11 @@
 		AQ_WRITE_REG(sc, reg + 4, (uint32_t)(val >> 32)); \
 	} while (/* CONSTCOND */0)
 
+/*
+ * Poll for a condition with timeout.  Checks 'expr' up to 'n' times,
+ * sleeping 'us' microseconds between checks.  Sets *errp to ETIMEDOUT
+ * on failure or 0 on success.
+ */
 #define WAIT_FOR(expr, us, n, errp)                             \
 	do {                                                    \
 		unsigned int _n;                                \
@@ -683,26 +772,43 @@
 #define FW_VERSION_MINOR(sc)	(((sc)->sc_fw_version >> 16) & 0xff)
 #define FW_VERSION_BUILD(sc)	((sc)->sc_fw_version & 0xffff)
 
-#define FEATURES_MIPS		0x00000001
-#define FEATURES_TPO2		0x00000002
-#define FEATURES_RPF2		0x00000004
-#define FEATURES_MPI_AQ		0x00000008
-#define FEATURES_AQ1_REV_A0	0x01000000
+/*
+ * Hardware feature/revision flags.
+ * Detected at attach time and stored in sc_features.  Used throughout
+ * the driver to select codepaths for different chip revisions.
+ * MIPS/TPO2/RPF2 indicate specific hardware blocks present.
+ */
+#define FEATURES_MIPS		0x00000001	/* has MIPS coprocessor */
+#define FEATURES_TPO2		0x00000002	/* TX path offload v2 */
+#define FEATURES_RPF2		0x00000004	/* RX packet filter v2 */
+#define FEATURES_MPI_AQ		0x00000008	/* MPI mailbox available */
+#define FEATURES_AQ1_REV_A0	0x01000000	/* Atlantic rev A0 */
 #define FEATURES_AQ1_REV_A	(FEATURES_AQ1_REV_A0)
-#define FEATURES_AQ1_REV_B0	0x02000000
-#define FEATURES_AQ1_REV_B1	0x04000000
+#define FEATURES_AQ1_REV_B0	0x02000000	/* Atlantic rev B0 */
+#define FEATURES_AQ1_REV_B1	0x04000000	/* Atlantic rev B1 */
 #define FEATURES_AQ1_REV_B	(FEATURES_AQ1_REV_B0|FEATURES_AQ1_REV_B1)
 #define FEATURES_AQ1		(FEATURES_AQ1_REV_A|FEATURES_AQ1_REV_B)
-#define FEATURES_AQ2		0x10000000
-#define FEATURES_AQ2_IFACE_A0	0x20000000
-#define FEATURES_AQ2_IFACE_B0	0x40000000
+#define FEATURES_AQ2		0x10000000	/* Atlantic2 chip */
+#define FEATURES_AQ2_IFACE_A0	0x20000000	/* AQ2 FW iface ver A0 */
+#define FEATURES_AQ2_IFACE_B0	0x40000000	/* AQ2 FW iface ver B0 */
 #define HWTYPE_AQ1_P(sc)	(((sc)->sc_features & FEATURES_AQ1) != 0)
 #define HWTYPE_AQ2_P(sc)	(((sc)->sc_features & FEATURES_AQ2) != 0)
 
-/* lock for firmware interface */
+/*
+ * Mutex protecting the firmware mailbox interface (MPI).
+ * Firmware communication is not reentrant, so all accesses to the
+ * MPI control/state registers must be serialized.
+ */
 #define AQ_MPI_LOCK(sc)		mtx_enter(&(sc)->sc_mpi_mutex);
 #define AQ_MPI_UNLOCK(sc)	mtx_leave(&(sc)->sc_mpi_mutex);
 
+/*
+ * FW2X MPI control register bit definitions.
+ * These are written to FW2X_MPI_CONTROL_REG to configure the desired
+ * link speeds, EEE modes, and flow control.  The firmware reads this
+ * register and negotiates accordingly.  The state register
+ * (FW2X_MPI_STATE_REG) uses the same bit layout to report the result.
+ */
 #define FW2X_CTRL_10BASET_HD			(1 << 0)
 #define FW2X_CTRL_10BASET_FD			(1 << 1)
 #define FW2X_CTRL_100BASETX_HD			(1 << 2)
@@ -767,16 +873,18 @@
 	 FW2X_CTRL_5GBASET_FD_EEE |	\
 	 FW2X_CTRL_10GBASET_FD_EEE)
 
+/* Hardware generation: Atlantic (AQ1) or Atlantic2 (AQ2). */
 enum aq_hwtype {
 	HWTYPE_AQ1,
 	HWTYPE_AQ2
 };
 
+/* AQ1 bootloader variants (detected during firmware reboot). */
 enum aq_fw_bootloader_mode {
 	FW_BOOT_MODE_UNKNOWN = 0,
-	FW_BOOT_MODE_FLB,
-	FW_BOOT_MODE_RBL_FLASH,
-	FW_BOOT_MODE_RBL_HOST_BOOTLOAD
+	FW_BOOT_MODE_FLB,		/* Flash Bootloader */
+	FW_BOOT_MODE_RBL_FLASH,		/* ROM-Based Loader, from flash */
+	FW_BOOT_MODE_RBL_HOST_BOOTLOAD	/* ROM-Based Loader, host boot */
 };
 
 enum aq_media_type {
@@ -785,6 +893,7 @@ enum aq_media_type {
 	AQ_MEDIA_TYPE_TP
 };
 
+/* Link speed flags (bitmask: multiple can be set for auto-negotiation). */
 enum aq_link_speed {
 	AQ_LINK_NONE    = 0,
 	AQ_LINK_10M	= (1 << 0),
@@ -804,10 +913,11 @@ enum aq_link_eee {
 	AQ_EEE_ENABLE = 1
 };
 
+/* MPI (Management Processor Interface) firmware state machine. */
 enum aq_hw_fw_mpi_state {
-	MPI_DEINIT      = 0,
+	MPI_DEINIT      = 0,	/* link down / inactive */
 	MPI_RESET       = 1,
-	MPI_INIT        = 2,
+	MPI_INIT        = 2,	/* link active / configured */
 	MPI_POWER       = 4
 };
 
@@ -824,45 +934,57 @@ enum aq_link_fc {
 #define AQ_SMB_REPEAT_TRANSMIT		0x1001
 #define AQ_SMB_REPEAT_NACK_TRANSMIT	0x1011
 
+/*
+ * DMA memory descriptor.
+ * Wraps the bus_dma(9) state needed for a contiguous DMA-accessible
+ * memory region (used for TX/RX descriptor rings).
+ */
 struct aq_dmamem {
-	bus_dmamap_t		aqm_map;
-	bus_dma_segment_t	aqm_seg;
-	int			aqm_nsegs;
-	size_t			aqm_size;
-	caddr_t			aqm_kva;
+	bus_dmamap_t		aqm_map;	/* DMA mapping handle */
+	bus_dma_segment_t	aqm_seg;	/* physical segment info */
+	int			aqm_nsegs;	/* number of segments (1) */
+	size_t			aqm_size;	/* allocation size in bytes */
+	caddr_t			aqm_kva;	/* kernel virtual address */
 };
 
 #define AQ_DMA_MAP(_aqm)	((_aqm)->aqm_map)
-#define AQ_DMA_DVA(_aqm)	((_aqm)->aqm_map->dm_segs[0].ds_addr)
-#define AQ_DMA_KVA(_aqm)	((void *)(_aqm)->aqm_kva)
+#define AQ_DMA_DVA(_aqm)	((_aqm)->aqm_map->dm_segs[0].ds_addr) /* device-visible addr */
+#define AQ_DMA_KVA(_aqm)	((void *)(_aqm)->aqm_kva) /* kernel-visible addr */
 #define AQ_DMA_LEN(_aqm)	((_aqm)->aqm_size)
 
 
+/*
+ * Firmware mailbox structures.
+ * AQ1 firmware uses a mailbox in device memory for communication.
+ * The driver reads/writes dwords at the mailbox address (sc_mbox_addr)
+ * using aq1_fw_downld_dwords().
+ */
 struct aq_mailbox_header {
         uint32_t version;
         uint32_t transaction_id;
         int32_t error;
 } __packed __aligned(4);
 
+/* Hardware statistics counters (unicast/multicast/broadcast pkt/byte counts) */
 struct aq_hw_stats_s {
-        uint32_t uprc;
-        uint32_t mprc;
-        uint32_t bprc;
-        uint32_t erpt;
-        uint32_t uptc;
-        uint32_t mptc;
-        uint32_t bptc;
-        uint32_t erpr;
-        uint32_t mbtc;
-        uint32_t bbtc;
-        uint32_t mbrc;
-        uint32_t bbrc;
-        uint32_t ubrc;
-        uint32_t ubtc;
-        uint32_t ptc;
-        uint32_t prc;
-        uint32_t dpc;   /* not exists in fw2x_msm_statistics */
-        uint32_t cprc;  /* not exists in fw2x_msm_statistics */
+        uint32_t uprc;		/* unicast packets received */
+        uint32_t mprc;		/* multicast packets received */
+        uint32_t bprc;		/* broadcast packets received */
+        uint32_t erpt;		/* TX errors */
+        uint32_t uptc;		/* unicast packets transmitted */
+        uint32_t mptc;		/* multicast packets transmitted */
+        uint32_t bptc;		/* broadcast packets transmitted */
+        uint32_t erpr;		/* RX errors */
+        uint32_t mbtc;		/* multicast bytes transmitted */
+        uint32_t bbtc;		/* broadcast bytes transmitted */
+        uint32_t mbrc;		/* multicast bytes received */
+        uint32_t bbrc;		/* broadcast bytes received */
+        uint32_t ubrc;		/* unicast bytes received */
+        uint32_t ubtc;		/* unicast bytes transmitted */
+        uint32_t ptc;		/* total packets transmitted */
+        uint32_t prc;		/* total packets received */
+        uint32_t dpc;		/* dropped packet count (fw1x only) */
+        uint32_t cprc;		/* checksum-verified pkts (fw1x only) */
 } __packed __aligned(4);
 
 struct aq_fw2x_capabilities {
@@ -893,9 +1015,15 @@ struct aq_fw2x_phy_cable_diag_data {
 	uint32_t lane_data[4];
 } __packed __aligned(4);
 
+/*
+ * FW2X mailbox layout in device memory (at sc_mbox_addr).
+ * This is the firmware's host interface structure.  The driver reads
+ * fields from it via aq1_fw_downld_dwords() to get statistics,
+ * capabilities, and PHY diagnostic information.
+ */
 struct aq_fw2x_mailbox {		/* struct fwHostInterface */
 	struct aq_mailbox_header header;
-	struct aq_fw2x_msm_statistics msm;	/* msmStatistics_t msm; */
+	struct aq_fw2x_msm_statistics msm;	/* MAC statistics */
 
 	uint32_t phy_info1;
 #define PHYINFO1_FAULT_CODE	__BITS(31,16)
@@ -912,13 +1040,26 @@ struct aq_fw2x_mailbox {		/* struct fwHostInterface */
 	/* ... */
 } __packed __aligned(4);
 
+/*
+ * Hardware descriptor formats.
+ *
+ * RX descriptors have two forms:
+ *   - "read" format: driver writes buf_addr for the NIC to DMA into
+ *   - "writeback" format: NIC writes status/length after receiving a packet
+ * The same memory location is used for both; the NIC overwrites the
+ * read descriptor with writeback data upon packet reception.
+ *
+ * TX descriptors come in two types:
+ *   - TXD (data): points to a packet data buffer
+ *   - TXC (context): carries VLAN tag or offload context
+ */
 struct aq_rx_desc_read {
-	uint64_t		buf_addr;
-	uint64_t		hdr_addr;
+	uint64_t		buf_addr;	/* DMA addr of receive buffer */
+	uint64_t		hdr_addr;	/* header split addr (unused) */
 } __packed;
 
 struct aq_rx_desc_wb {
-	uint32_t		type;
+	uint32_t		type;		/* pkt type, RSS, VLAN, csum */
 #define AQ_RXDESC_TYPE_RSSTYPE	0x000f
 #define AQ_RXDESC_TYPE_ETHER	0x0030
 #define AQ_RXDESC_TYPE_PROTO	0x01c0
@@ -954,6 +1095,7 @@ struct aq_tx_desc {
 #define AQ_TXDESC_CTL1_CMD_FCS	(1 << 23)
 #define AQ_TXDESC_CTL1_CMD_IP4CSUM (1 << 24)
 #define AQ_TXDESC_CTL1_CMD_L4CSUM (1 << 25)
+#define AQ_TXDESC_CTL1_CMD_LSO	(1 << 26)
 #define AQ_TXDESC_CTL1_CMD_WB	(1 << 27)
 
 #define AQ_TXDESC_CTL1_VID_SHIFT 4
@@ -972,48 +1114,75 @@ struct aq_tx_desc {
 #define AQ_TXC_CTL2_MSS_SHIFT		16
 } __packed;
 
+/*
+ * Per-descriptor slot: tracks the DMA mapping and mbuf for one
+ * descriptor in a TX or RX ring.
+ */
 struct aq_slot {
-	bus_dmamap_t		 as_map;
-	struct mbuf		*as_m;
+	bus_dmamap_t		 as_map;	/* DMA map for this buffer */
+	struct mbuf		*as_m;		/* associated mbuf (or NULL) */
 };
 
+/*
+ * Per-queue receive ring state.
+ * Each RX queue has a ring of AQ_RXD_NUM descriptors in DMA memory
+ * (rx_mem), an array of per-slot tracking (rx_slots), producer/consumer
+ * indices, and mbuf chain assembly state for multi-descriptor packets.
+ */
 struct aq_rxring {
-	struct ifiqueue		*rx_ifiq;
-	struct aq_dmamem	 rx_mem;
-	struct aq_slot		*rx_slots;
-	int			 rx_q;
-	int			 rx_irq;
+	struct ifiqueue		*rx_ifiq;	/* associated input queue */
+	struct aq_dmamem	 rx_mem;	/* DMA mem for descriptor ring */
+	struct aq_slot		*rx_slots;	/* per-descriptor slot array */
+	int			 rx_q;		/* hardware queue index */
+	int			 rx_irq;	/* MSI-X vector for this queue */
 
-	struct timeout		 rx_refill;
-	struct if_rxring	 rx_rxr;
-	uint32_t		 rx_prod;
-	uint32_t		 rx_cons;
+	struct timeout		 rx_refill;	/* deferred refill timeout */
+	struct if_rxring	 rx_rxr;	/* rxring accounting (MI) */
+	uint32_t		 rx_prod;	/* producer: next to fill */
+	uint32_t		 rx_cons;	/* consumer: next to reap */
 
-	struct mbuf		*rx_m_head;
-	struct mbuf		**rx_m_tail;
-	int			 rx_m_error;
+	/* multi-descriptor packet assembly (jumbo frames span descs) */
+	struct mbuf		*rx_m_head;	/* head of in-progress chain */
+	struct mbuf		**rx_m_tail;	/* tail pointer for appending */
+	int			 rx_m_error;	/* error seen on this pkt */
 };
 
+/*
+ * Per-queue transmit ring state.
+ * Each TX queue has a ring of AQ_TXD_NUM descriptors in DMA memory
+ * and per-slot tracking for outstanding transmissions.
+ */
 struct aq_txring {
-	struct ifqueue		*tx_ifq;
-	struct aq_dmamem	 tx_mem;
-	struct aq_slot		*tx_slots;
-	int			 tx_q;
-	int			 tx_irq;
-	uint32_t		 tx_prod;
-	uint32_t		 tx_cons;
+	struct ifqueue		*tx_ifq;	/* associated output queue */
+	struct aq_dmamem	 tx_mem;	/* DMA mem for descriptor ring */
+	struct aq_slot		*tx_slots;	/* per-descriptor slot array */
+	int			 tx_q;		/* hardware queue index */
+	int			 tx_irq;	/* MSI-X vector for this queue */
+	uint32_t		 tx_prod;	/* producer: next to enqueue */
+	uint32_t		 tx_cons;	/* consumer: next to reclaim */
 };
 
+/*
+ * Per-queue state, combining one RX ring and one TX ring.
+ * In multi-queue mode, each aq_queues gets its own MSI-X vector
+ * and interrupt handler (aq_intr_queue), bound to a specific CPU.
+ */
 struct aq_queues {
-	char			 q_name[16];
-	void			*q_ihc;
-	struct aq_softc		*q_sc;
-	int			 q_index;
+	char			 q_name[16];	/* "aq0:0", "aq0:1", etc. */
+	void			*q_ihc;		/* per-queue intr handle */
+	struct aq_softc		*q_sc;		/* back-pointer to softc */
+	int			 q_index;	/* queue index (0..nqueues-1) */
 	struct aq_rxring 	 q_rx;
 	struct aq_txring 	 q_tx;
 };
 
 
+/*
+ * Firmware operations vtable.
+ * Different firmware versions (1.x, 2.x/3.x, AQ2) use different
+ * register interfaces.  This abstraction allows the common driver
+ * code to work with any firmware variant.
+ */
 struct aq_softc;
 struct aq_firmware_ops {
 	int (*reset)(struct aq_softc *);
@@ -1025,14 +1194,21 @@ struct aq_firmware_ops {
 	int (*get_stats)(struct aq_softc *, struct aq_hw_stats_s *);
 };
 
+/*
+ * Driver softc (software context).
+ * One per device instance, allocated by autoconf.  Contains all
+ * per-device state: PCI handles, DMA tag, queue state, firmware
+ * interface, media/link state, and the ifnet/arpcom for the
+ * network stack.
+ */
 struct aq_softc {
-	struct device		sc_dev;
-	uint16_t		sc_product;
-	uint16_t		sc_revision;
-	bus_dma_tag_t		sc_dmat;
-	pci_chipset_tag_t	sc_pc;
-	pcitag_t		sc_pcitag;
-	int			sc_nqueues;
+	struct device		sc_dev;		/* base device (must be first) */
+	uint16_t		sc_product;	/* PCI product ID */
+	uint16_t		sc_revision;	/* PCI revision */
+	bus_dma_tag_t		sc_dmat;	/* DMA tag for allocations */
+	pci_chipset_tag_t	sc_pc;		/* PCI chipset handle */
+	pcitag_t		sc_pcitag;	/* PCI device tag */
+	int			sc_nqueues;	/* number of active queues */
 	struct aq_queues	sc_queues[AQ_MAXQ];
 	struct intrmap		*sc_intrmap;
 	void			*sc_ih;
@@ -1058,6 +1234,10 @@ struct aq_softc {
 	struct mutex		sc_mpi_mutex;
 };
 
+/*
+ * PCI device ID table for autoconf matching.
+ * pci_matchbyid() checks if the attached PCI device matches any entry.
+ */
 const struct pci_matchid aq_devices[] = {
 	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC100 },
 	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_AQC107 },
@@ -1084,6 +1264,12 @@ const struct pci_matchid aq_devices[] = {
 	{ PCI_VENDOR_AQUANTIA, PCI_PRODUCT_AQUANTIA_D109 },
 };
 
+/*
+ * Product capability table.
+ * Maps each PCI product ID to its hardware generation (AQ1/AQ2),
+ * physical media type (copper/fibre), and supported link speeds.
+ * aq_lookup() searches this table after a successful match.
+ */
 const struct aq_product {
 	pci_vendor_id_t aq_vendor;
 	pci_product_id_t aq_product;
@@ -1242,6 +1428,12 @@ int	aq2_fw_set_mode(struct aq_softc *, enum aq_hw_fw_mpi_state,
 	    enum aq_link_speed, enum aq_link_fc, enum aq_link_eee);
 int	aq2_fw_get_stats(struct aq_softc *, struct aq_hw_stats_s *);
 
+/*
+ * Firmware ops for each firmware generation.
+ * fw1x: AQ1 firmware version 1.x (mostly stubs, limited support)
+ * fw2x: AQ1 firmware version 2.x/3.x (full support)
+ * aq2:  AQ2 firmware (completely different register interface)
+ */
 const struct aq_firmware_ops aq_fw1x_ops = {
 	.reset = aq_fw1x_reset,
 	.get_mac_addr = aq1_get_mac_addr,
@@ -1266,6 +1458,15 @@ const struct aq_firmware_ops aq2_fw_ops = {
 	.get_stats = aq2_fw_get_stats
 };
 
+/*
+ * OpenBSD autoconf(9) attachment glue.
+ *
+ * cfattach: specifies softc size, match/attach/activate functions.
+ * cfdriver: specifies driver name ("aq") and type (DV_IFNET = network).
+ *
+ * The kernel calls aq_match() for each PCI device to check if this
+ * driver handles it, then aq_attach() to initialize a matched device.
+ */
 const struct cfattach aq_ca = {
 	sizeof(struct aq_softc), aq_match, aq_attach, NULL,
 	aq_activate
@@ -1275,6 +1476,12 @@ struct cfdriver aq_cd = {
 	NULL, "aq", DV_IFNET
 };
 
+/*
+ * Autoconf match function.
+ * Called by the PCI bus driver for each device.  Returns nonzero if
+ * this driver can handle the device (checks vendor/product against
+ * aq_devices table).
+ */
 int
 aq_match(struct device *dev, void *match, void *aux)
 {
@@ -1282,6 +1489,10 @@ aq_match(struct device *dev, void *match, void *aux)
 	    sizeof(aq_devices) / sizeof(aq_devices[0]));
 }
 
+/*
+ * Look up product-specific capabilities (hw type, media, speeds)
+ * for a matched device.
+ */
 const struct aq_product *
 aq_lookup(const struct pci_attach_args *pa)
 {
@@ -1297,6 +1508,20 @@ aq_lookup(const struct pci_attach_args *pa)
 	return NULL;
 }
 
+/*
+ * Autoconf attach function - main driver initialization.
+ *
+ * Called once for each matched PCI device.  Performs the full
+ * initialization sequence:
+ *   1. Map PCI BAR0 (MMIO register space)
+ *   2. Set up interrupts (MSI-X preferred, then MSI, then legacy)
+ *   3. Boot/reset the on-chip firmware
+ *   4. Reset and initialize the hardware
+ *   5. Read the MAC address from firmware/EEPROM
+ *   6. Initialize RSS (Receive Side Scaling)
+ *   7. Register the network interface with the kernel (if_attach)
+ *   8. Set up per-queue interrupt handlers and moderation
+ */
 void
 aq_attach(struct device *parent, struct device *self, void *aux)
 {
@@ -1338,6 +1563,19 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 		return;
 	}
 
+	/*
+	 * Interrupt setup.
+	 *
+	 * Try MSI-X first (preferred for multi-queue).  If we get >1
+	 * MSI-X vector, reserve vector 0 for link status interrupts
+	 * and use the remaining vectors for per-queue TX/RX completion.
+	 * intrmap_create() determines how many queues to use based on
+	 * available vectors and CPU count.
+	 *
+	 * Fall back to MSI (single vector) or legacy INTx if MSI-X
+	 * is not available.  In these modes we use a single queue and
+	 * a combined interrupt handler (aq_intr).
+	 */
 	sc->sc_nqueues = 1;
 	sc->sc_linkstat_irq = AQ_LINKSTAT_IRQ;
 	isr = aq_intr;
@@ -1346,6 +1584,7 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 	if (pci_intr_map_msix(pa, 0, &ih) == 0) {
 		int nmsix = pci_intr_msix_count(pa);
 		if (nmsix > 1) {
+			/* Reserve vector 0 for link; rest for queues */
 			nmsix--;
 			sc->sc_intrmap = intrmap_create(&sc->sc_dev, nmsix,
 			    MIN(AQ_MAXQ, IF_MAX_VECTORS), INTRMAP_POWEROF2);
@@ -1353,9 +1592,9 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 			KASSERT(sc->sc_nqueues > 0);
 			KASSERT(powerof2(sc->sc_nqueues));
 
-			sc->sc_linkstat_irq = 0;
-			isr = aq_intr_link;
-			irqnum++;
+			sc->sc_linkstat_irq = 0;  /* link on vector 0 */
+			isr = aq_intr_link;       /* vector 0 handler */
+			irqnum++;                 /* queues start at 1 */
 		}
 		irqmode = AQ_INTR_CTRL_IRQMODE_MSIX;
 	} else if (pci_intr_map_msi(pa, &ih) == 0) {
@@ -1367,6 +1606,7 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 		return;
 	}
 
+	/* Establish the primary interrupt handler (link or combined) */
 	sc->sc_ih = pci_intr_establish(pa->pa_pc, ih,
 	    IPL_NET | IPL_MPSAFE, isr, sc, self->dv_xname);
 	intrstr = pci_intr_string(pa->pa_pc, ih);
@@ -1405,6 +1645,17 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 	sc->sc_media_type = aqp->aq_media_type;
 	sc->sc_available_rates = aqp->aq_available_rates;
 
+	/*
+	 * Register the network interface with the kernel.
+	 *
+	 * if_flags: BROADCAST (can send to all), MULTICAST (group addr),
+	 *           SIMPLEX (can't hear own transmissions).
+	 * if_xflags: MPSAFE = this driver's entry points are MP-safe
+	 *            (use per-queue locks, not the kernel lock).
+	 * if_qstart: per-queue transmit function (called by ifq_start).
+	 * if_hardmtu: maximum MTU the hardware supports (9000 = jumbo).
+	 * if_capabilities: hardware offload features advertised to stack.
+	 */
 	ifmedia_init(&sc->sc_media, IFM_IMASK, aq_ifmedia_change,
 	    aq_ifmedia_status);
 
@@ -1567,6 +1818,18 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 	printf("\n");
 }
 
+/*
+ * AQ1 firmware boot sequence.
+ *
+ * AQ1 devices have two bootloader modes:
+ *   - FLB (Flash Bootloader): firmware loaded directly from SPI flash
+ *   - RBL (ROM-Based Loader): a ROM loads firmware from flash or host
+ *
+ * This function detects which mode is in use, performs the appropriate
+ * reset sequence, reads the firmware version, selects the fw ops
+ * (fw1x vs fw2x), detects the chip revision, and initializes the
+ * firmware coprocessor (UCP).
+ */
 int
 aq1_fw_reboot(struct aq_softc *sc)
 {
@@ -1641,6 +1904,11 @@ aq1_fw_reboot(struct aq_softc *sc)
 	return aq1_hw_init_ucp(sc);
 }
 
+/*
+ * AQ1 MAC soft reset using the ROM-Based Loader (RBL).
+ * Issues a global software reset, then waits for the RBL to reload
+ * firmware from flash.  Returns the boot mode (flash or host bootload).
+ */
 int
 aq1_mac_soft_reset_rbl(struct aq_softc *sc, enum aq_fw_bootloader_mode *mode)
 {
@@ -1696,6 +1964,12 @@ aq1_mac_soft_reset_rbl(struct aq_softc *sc, enum aq_fw_bootloader_mode *mode)
 	return 0;
 }
 
+/*
+ * AQ1 MAC soft reset using the Flash Bootloader (FLB).
+ * Clears the SPI interface, kicks the MAC, performs a global software
+ * reset, and waits for firmware to start.  More complex than RBL due
+ * to the need to manually manage SPI flash recovery.
+ */
 int
 aq1_mac_soft_reset_flb(struct aq_softc *sc)
 {
@@ -1784,6 +2058,7 @@ aq1_mac_soft_reset_flb(struct aq_softc *sc)
 
 }
 
+/* Choose the appropriate reset method (RBL or FLB) for AQ1 devices. */
 int
 aq1_mac_soft_reset(struct aq_softc *sc, enum aq_fw_bootloader_mode *mode)
 {
@@ -1795,6 +2070,7 @@ aq1_mac_soft_reset(struct aq_softc *sc, enum aq_fw_bootloader_mode *mode)
 	return aq1_mac_soft_reset_flb(sc);
 }
 
+/* Trigger a full global software reset of the AQ1 hardware. */
 void
 aq1_global_software_reset(struct aq_softc *sc)
 {
@@ -1811,6 +2087,7 @@ aq1_global_software_reset(struct aq_softc *sc)
         AQ_WRITE_REG(sc, AQ_FW_SOFTRESET_REG, v);
 }
 
+/* Wait for firmware to write its version number, then read it. */
 int
 aq1_fw_read_version(struct aq_softc *sc)
 {
@@ -1827,6 +2104,11 @@ aq1_fw_read_version(struct aq_softc *sc)
 	return error;
 }
 
+/*
+ * Select firmware ops based on version, detect chip revision.
+ * FW version 1.x -> fw1x_ops, 2.x/3.x -> fw2x_ops.
+ * Chip revision (A0, B0, B1) determines which features are available.
+ */
 int
 aq1_fw_version_init(struct aq_softc *sc)
 {
@@ -1874,6 +2156,12 @@ aq1_fw_version_init(struct aq_softc *sc)
 	return error;
 }
 
+/*
+ * Initialize the AQ1 microcontroller/coprocessor (UCP).
+ * For fw1x, generates a random MAC seed if needed and waits for the
+ * firmware mailbox address to become available.  Also enforces a
+ * minimum firmware version requirement.
+ */
 int
 aq1_hw_init_ucp(struct aq_softc *sc)
 {
@@ -1915,6 +2203,13 @@ aq1_hw_init_ucp(struct aq_softc *sc)
 	return 0;
 }
 
+/*
+ * Read from the AQ2 firmware shared memory interface.
+ * AQ2 firmware uses a producer-consumer transaction ID scheme for
+ * coherency: the driver reads the transaction ID before and after
+ * the data read; if they match, the data is consistent.  Retries
+ * if the firmware was updating the buffer mid-read.
+ */
 int
 aq2_interface_buffer_read(struct aq_softc *sc, uint32_t reg0, uint32_t *data0,
     uint32_t size0)
@@ -1948,6 +2243,12 @@ aq2_interface_buffer_read(struct aq_softc *sc, uint32_t reg0, uint32_t *data0,
 	return 0;
 }
 
+/*
+ * AQ2 firmware boot sequence.
+ * Requests a firmware reboot, waits for it to complete, reads the
+ * firmware version and interface version, and reads the filter
+ * capabilities (ART base index) for packet classification setup.
+ */
 int
 aq2_fw_reboot(struct aq_softc *sc)
 {
@@ -2050,6 +2351,11 @@ aq2_fw_reboot(struct aq_softc *sc)
 	return 0;
 }
 
+/*
+ * Reset the hardware interrupt controller, then call the firmware-
+ * specific reset function (which reads capabilities / configures
+ * the firmware interface).
+ */
 int
 aq_hw_reset(struct aq_softc *sc)
 {
@@ -2073,6 +2379,10 @@ aq_hw_reset(struct aq_softc *sc)
 	return sc->sc_fw_ops->reset(sc);
 }
 
+/*
+ * Read the MAC address from AQ1's eFuse shadow area via the firmware
+ * mailbox.  The eFuse stores a factory-programmed MAC address.
+ */
 int
 aq1_get_mac_addr(struct aq_softc *sc)
 {
@@ -2119,12 +2429,22 @@ aq1_get_mac_addr(struct aq_softc *sc)
 	return 0;
 }
 
+/*
+ * Power management hook (suspend/resume).
+ * Currently a no-op; the driver does not implement suspend/resume.
+ */
 int
 aq_activate(struct device *self, int act)
 {
 	return 0;
 }
 
+/*
+ * Read dwords from the AQ1 firmware's internal memory via the mailbox.
+ * Acquires a semaphore for exclusive access, then issues a series of
+ * mailbox read commands.  Used to read the MAC address, firmware
+ * capabilities, and statistics from firmware memory.
+ */
 int
 aq1_fw_downld_dwords(struct aq_softc *sc, uint32_t addr, uint32_t *p,
     uint32_t cnt)
@@ -2170,6 +2490,11 @@ aq1_fw_downld_dwords(struct aq_softc *sc, uint32_t addr, uint32_t *p,
 	return error;
 }
 
+/*
+ * AQ1 fw2x reset: reads the firmware capabilities bitmask from the
+ * mailbox.  The capabilities indicate which features (link speeds,
+ * EEE, statistics, etc.) the firmware supports.
+ */
 int
 aq_fw2x_reset(struct aq_softc *sc)
 {
@@ -2220,6 +2545,11 @@ aq_fw1x_get_stats(struct aq_softc *sc, struct aq_hw_stats_s *w)
 }
 
 
+/*
+ * Read current link state from fw2x.
+ * The MPI state register contains the negotiated link speed and flow
+ * control status, updated by firmware when link state changes.
+ */
 int
 aq_fw2x_get_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state *modep,
     enum aq_link_speed *speedp, enum aq_link_fc *fcp, enum aq_link_eee *eeep)
@@ -2276,6 +2606,11 @@ aq_fw2x_get_stats(struct aq_softc *sc, struct aq_hw_stats_s *w)
 	return 0;
 }
 
+/*
+ * Wait for AQ2 firmware to acknowledge a shared memory write.
+ * After writing configuration to the "interface in" region, the driver
+ * signals the firmware and polls for the ACK to be cleared.
+ */
 static int
 aq2_fw_wait_shared_ack(struct aq_softc *sc)
 {
@@ -2289,6 +2624,11 @@ aq2_fw_wait_shared_ack(struct aq_softc *sc)
 	return error;
 }
 
+/*
+ * AQ2 firmware reset: set link control to active mode, configure MTU,
+ * set up multicast/broadcast/promisc receive policies, and wait for
+ * firmware acknowledgment.
+ */
 int
 aq2_fw_reset(struct aq_softc *sc)
 {
@@ -2319,6 +2659,11 @@ aq2_fw_reset(struct aq_softc *sc)
 	return error;
 }
 
+/*
+ * Read MAC address for AQ2 devices.
+ * Reads from the firmware interface "in" region.  Falls back to
+ * reading from the device tree on FDT platforms (e.g. ARM).
+ */
 int
 aq2_get_mac_addr(struct aq_softc *sc)
 {
@@ -2349,6 +2694,11 @@ aq2_get_mac_addr(struct aq_softc *sc)
 	return 0;
 }
 
+/*
+ * Configure link speed, flow control, and EEE on AQ2 firmware.
+ * Writes the desired link options to the firmware shared memory
+ * "interface in" region and waits for acknowledgment.
+ */
 int
 aq2_fw_set_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state w,
     enum aq_link_speed speed, enum aq_link_fc fc, enum aq_link_eee eee)
@@ -2420,6 +2770,11 @@ aq2_fw_set_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state w,
 	return error;
 }
 
+/*
+ * Read current link state from AQ2 firmware.
+ * Reads the link status register from the "interface out" shared memory
+ * and decodes the negotiated speed, flow control, and EEE state.
+ */
 int
 aq2_fw_get_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state *modep,
     enum aq_link_speed *speedp, enum aq_link_fc *fcp, enum aq_link_eee *eeep)
@@ -2482,6 +2837,18 @@ aq2_fw_get_stats(struct aq_softc *sc, struct aq_hw_stats_s *w)
 	return 0;
 }
 
+/*
+ * Main hardware initialization.
+ * Called once during attach after firmware is booted.  Configures:
+ *   - PCI DMA request limits (AQ1 B0 workaround)
+ *   - FPGA clock ratio (AQ2)
+ *   - TX and RX data paths
+ *   - Primary MAC address filter
+ *   - QoS (traffic class buffer sizes, scheduling weights)
+ *   - AQ2 action resolver table
+ *   - Interrupt controller mode (MSI-X/MSI/legacy)
+ *   - Link status interrupt mapping
+ */
 int
 aq_hw_init(struct aq_softc *sc, int irqmode, int multivec)
 {
@@ -2549,6 +2916,12 @@ aq_hw_init(struct aq_softc *sc, int irqmode, int multivec)
 	return 0;
 }
 
+/*
+ * Initialize the transmit data path.
+ * Configures the TX traffic class mode, LSO (Large Send Offload)
+ * TCP flag templates for segmentation, TPO2 offload engine,
+ * DCA (Direct Cache Access, disabled), and scratch pad insertion.
+ */
 void
 aq_hw_init_tx_path(struct aq_softc *sc)
 {
@@ -2575,6 +2948,19 @@ aq_hw_init_tx_path(struct aq_softc *sc)
 	}
 }
 
+/*
+ * Initialize the receive data path.
+ * Configures:
+ *   - RX traffic class and flow control mode
+ *   - RSS hash type selection (AQ2: all hash types; AQ1: via RPF2)
+ *   - RSS control register with queue count encoding
+ *   - Ethertype filters (AQ1: disable all 32 entries)
+ *   - L2 unicast/multicast address filters (disable, set to HOST action)
+ *   - VLAN filters (promiscuous, accept untagged)
+ *   - AQ2 Action Resolver Table entries for L2/VLAN filtering
+ *   - Broadcast filter (enable, deliver to host)
+ *   - DCA (disabled)
+ */
 void
 aq_hw_init_rx_path(struct aq_softc *sc)
 {
@@ -2600,7 +2986,7 @@ aq_hw_init_rx_path(struct aq_softc *sc)
 			bits = 0x11111111;
 			break;
 		case 4:
-			bits = 0x22222222;	
+			bits = 0x22222222;
 			break;
 		case 8:
 			bits = 0x33333333;
@@ -2684,7 +3070,12 @@ aq_hw_init_rx_path(struct aq_softc *sc)
 	AQ_WRITE_REG_BIT(sc, RX_DMA_DCA_REG, RX_DMA_DCA_MODE, 0);
 }
 
-/* set multicast filter. index 0 for own address */
+/*
+ * Program a unicast MAC address into the hardware L2 filter.
+ * Index 0 is reserved for the interface's own MAC address.
+ * Indices 1..AQ_HW_MAC_NUM-1 are used for additional unicast
+ * and multicast addresses.  Passing enaddr==NULL disables the entry.
+ */
 int
 aq_set_mac_addr(struct aq_softc *sc, int index, uint8_t *enaddr)
 {
@@ -2719,6 +3110,7 @@ aq_set_mac_addr(struct aq_softc *sc, int index, uint8_t *enaddr)
 	return 0;
 }
 
+/* Query current link speed/fc/eee from firmware; fail if not initialized. */
 int
 aq_get_linkmode(struct aq_softc *sc, enum aq_link_speed *speed,
     enum aq_link_fc *fc, enum aq_link_eee *eee)
@@ -2735,6 +3127,7 @@ aq_get_linkmode(struct aq_softc *sc, enum aq_link_speed *speed,
 	return 0;
 }
 
+/* Set desired link speed/fc/eee via firmware. */
 int
 aq_set_linkmode(struct aq_softc *sc, enum aq_link_speed speed,
     enum aq_link_fc fc, enum aq_link_eee eee)
@@ -2742,6 +3135,12 @@ aq_set_linkmode(struct aq_softc *sc, enum aq_link_speed speed,
 	return sc->sc_fw_ops->set_mode(sc, MPI_INIT, speed, fc, eee);
 }
 
+/*
+ * Set link parameters via fw2x MPI control register.
+ * Builds a 64-bit control word with the desired link speeds, EEE,
+ * and flow control settings, then writes it to the firmware.
+ * MPI_INIT enables the link; MPI_DEINIT tears it down.
+ */
 int
 aq_fw2x_set_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state mode,
     enum aq_link_speed speed, enum aq_link_fc fc, enum aq_link_eee eee)
@@ -2795,6 +3194,15 @@ aq_fw2x_set_mode(struct aq_softc *sc, enum aq_hw_fw_mpi_state mode,
 	return error;
 }
 
+/*
+ * Configure Quality of Service parameters.
+ * Sets up the TX Packet Scheduler (TPS) with descriptor rate limits,
+ * arbitration modes, and traffic class credit/weight values.
+ * Configures TX and RX buffer sizes and high/low watermarks for
+ * flow control (XOFF thresholds).
+ * Maps 802.1p priority values to traffic classes.
+ * For AQ2, also sets up ring-to-TC mapping tables.
+ */
 void
 aq_hw_qos_set(struct aq_softc *sc)
 {
@@ -2877,6 +3285,19 @@ aq_hw_qos_set(struct aq_softc *sc)
 	}
 }
 
+/*
+ * Initialize Receive Side Scaling (RSS).
+ * RSS distributes incoming packets across multiple RX queues based on
+ * a hash of the packet headers, enabling parallel processing on
+ * multiple CPUs.
+ *
+ * Programs:
+ *   1. AQ2 redirection table (64 entries per traffic class)
+ *   2. The RSS hash key (Toeplitz hash, 40 bytes) - generated by
+ *      stoeplitz_to_key() to match the kernel's software Toeplitz
+ *   3. The RSS indirection table (maps hash values -> queue numbers)
+ *      Entries are 3-bit queue IDs packed into 16-bit registers.
+ */
 int
 aq_init_rss(struct aq_softc *sc)
 {
@@ -2885,7 +3306,7 @@ aq_init_rss(struct aq_softc *sc)
 	int bits, queue;
 	int error;
 	int i;
-	
+
 	if (sc->sc_nqueues == 1)
 		return 0;
 
@@ -2953,6 +3374,12 @@ aq_init_rss(struct aq_softc *sc)
 	return 0;
 }
 
+/*
+ * Reset/initialize a TX descriptor ring.
+ * If start==0, just disables the ring (used during teardown).
+ * If start==1, programs the ring base address, size, head/tail pointers,
+ * and interrupt mapping into the hardware, then enables the ring.
+ */
 void
 aq_txring_reset(struct aq_softc *sc, struct aq_txring *tx, int start)
 {
@@ -2991,6 +3418,13 @@ aq_txring_reset(struct aq_softc *sc, struct aq_txring *tx, int start)
 	AQ_WRITE_REG_BIT(sc, TDM_DCAD_REG(tx->tx_q), TDM_DCAD_CPUID_EN, 0);
 }
 
+/*
+ * Reset/initialize an RX descriptor ring.
+ * If start==0, just disables the ring.
+ * If start==1, programs ring base address, size, buffer size,
+ * VLAN stripping mode, head/tail pointers, interrupt mapping,
+ * and DCA settings, then enables the ring.
+ */
 void
 aq_rxring_reset(struct aq_softc *sc, struct aq_rxring *rx, int start)
 {
@@ -3048,6 +3482,14 @@ aq_rxring_reset(struct aq_softc *sc, struct aq_rxring *rx, int start)
 	AQ_WRITE_REG_BIT(sc, RX_DMA_DESC_REG(rx->rx_q), RX_DMA_DESC_EN, 1);
 }
 
+/*
+ * Fill RX ring slots with fresh mbufs for the NIC to DMA into.
+ * Allocates cluster mbufs, loads their DMA addresses into the
+ * RX descriptor ring, and advances the producer pointer.
+ * The NIC reads descriptors between the tail pointer (producer)
+ * and head pointer (consumer) to find available receive buffers.
+ * Returns the number of slots that could NOT be filled.
+ */
 static inline unsigned int
 aq_rx_fill_slots(struct aq_softc *sc, struct aq_rxring *rx, uint nslots)
 {
@@ -3098,6 +3540,11 @@ aq_rx_fill_slots(struct aq_softc *sc, struct aq_rxring *rx, uint nslots)
 	return (nslots - fills);
 }
 
+/*
+ * Refill RX ring using the if_rxring accounting framework.
+ * if_rxr_get() returns how many new buffers to post, respecting
+ * the ring size and livelock protection limits.
+ */
 int
 aq_rx_fill(struct aq_softc *sc, struct aq_rxring *rx)
 {
@@ -3112,6 +3559,12 @@ aq_rx_fill(struct aq_softc *sc, struct aq_rxring *rx)
 	return 0;
 }
 
+/*
+ * Deferred RX ring refill (timeout callback).
+ * If the ring runs completely empty (mbuf allocation pressure),
+ * we can't refill from the interrupt handler.  This timeout
+ * retries periodically until buffers become available.
+ */
 void
 aq_refill(void *xq)
 {
@@ -3124,6 +3577,23 @@ aq_refill(void *xq)
 		timeout_add(&q->q_rx.rx_refill, 1);
 }
 
+/*
+ * RX completion handler - process received packets.
+ *
+ * Called from the interrupt handler.  Reads the hardware head pointer
+ * to determine how many descriptors have been written back by the NIC.
+ * For each completed descriptor:
+ *   - Unloads the DMA mapping and retrieves the mbuf
+ *   - Checks the writeback status for errors (MAC, DMA)
+ *   - Extracts RSS hash, VLAN tag, and checksum offload results
+ *   - Assembles multi-descriptor packets (jumbo frames)
+ *   - Enqueues complete packets into an mbuf_list
+ *
+ * After processing, hands the packet list to ifiq_input() which
+ * delivers them to the network stack.  Then refills the ring.
+ * If ifiq_input returns nonzero, the input queue is congested
+ * (livelock protection triggers).
+ */
 void
 aq_rxeof(struct aq_softc *sc, struct aq_rxring *rx)
 {
@@ -3242,6 +3712,14 @@ aq_rxeof(struct aq_softc *sc, struct aq_rxring *rx)
 	}
 }
 
+/*
+ * TX completion handler - reclaim transmitted descriptors.
+ *
+ * Called from the interrupt handler.  Reads the hardware head pointer
+ * to see how far the NIC has progressed through the TX ring.  For
+ * each completed descriptor, unloads the DMA mapping and frees the
+ * mbuf.  If the queue was stalled (oactive), restarts transmission.
+ */
 void
 aq_txeof(struct aq_softc *sc, struct aq_txring *tx)
 {
@@ -3289,6 +3767,23 @@ aq_txeof(struct aq_softc *sc, struct aq_txring *tx)
 	}
 }
 
+/*
+ * Transmit start function (ifq_start callback).
+ *
+ * Called by the network stack when packets are enqueued.  Dequeues
+ * mbufs from the interface queue, maps them for DMA, and writes
+ * TX descriptors.  Handles:
+ *   - Multi-segment packets (scatter-gather DMA)
+ *   - VLAN tag insertion via context descriptors (TXC)
+ *   - IPv4/TCP/UDP checksum offload flags
+ *   - EFBIG recovery via m_defrag()
+ *   - BPF tap for packet capture
+ *
+ * The last segment of each packet gets EOP (end of packet) and WB
+ * (write back) flags so the NIC knows when transmission is complete.
+ * After filling descriptors, advances the tail pointer to kick the
+ * NIC's DMA engine.
+ */
 void
 aq_start(struct ifqueue *ifq)
 {
@@ -3474,6 +3969,12 @@ aq_start(struct ifqueue *ifq)
 	}
 }
 
+/*
+ * Per-queue interrupt handler (MSI-X multi-vector mode).
+ * Each queue gets its own MSI-X vector and interrupt handler,
+ * bound to a specific CPU for cache locality.  Handles both
+ * TX completion and RX completion for one queue pair.
+ */
 int
 aq_intr_queue(void *arg)
 {
@@ -3498,6 +3999,11 @@ aq_intr_queue(void *arg)
 	return (clear != 0);
 }
 
+/*
+ * Link status change interrupt handler (MSI-X vector 0).
+ * In multi-vector mode, vector 0 is dedicated to link status.
+ * Calls aq_update_link_status() to check for link up/down.
+ */
 int
 aq_intr_link(void *arg)
 {
@@ -3514,6 +4020,11 @@ aq_intr_link(void *arg)
 	return 0;
 }
 
+/*
+ * Combined interrupt handler (single vector: MSI or legacy mode).
+ * Handles link status, TX completion, and RX completion all from
+ * one interrupt.  Only queue 0 is used in this mode.
+ */
 int
 aq_intr(void *arg)
 {
@@ -3547,6 +4058,7 @@ aq_watchdog(struct ifnet *ifp)
 
 }
 
+/* Free DMA maps and any remaining mbufs for a ring's slot array. */
 void
 aq_free_slots(struct aq_softc *sc, struct aq_slot *slots, int allocated,
     int total)
@@ -3563,6 +4075,12 @@ aq_free_slots(struct aq_softc *sc, struct aq_slot *slots, int allocated,
 	free(slots, M_DEVBUF, total * sizeof(*as));
 }
 
+/*
+ * Allocate resources for one TX/RX queue pair.
+ * Creates DMA maps for each slot, allocates DMA memory for the
+ * descriptor rings, and programs the hardware ring registers.
+ * On failure, tears down any partially-allocated resources.
+ */
 int
 aq_queue_up(struct aq_softc *sc, struct aq_queues *aq)
 {
@@ -3651,6 +4169,7 @@ destroy_rx_slots:
 	return ENOMEM;
 }
 
+/* Tear down one TX/RX queue pair: disable rings, free slots and DMA memory. */
 void
 aq_queue_down(struct aq_softc *sc, struct aq_queues *aq)
 {
@@ -3688,6 +4207,11 @@ aq_queue_down(struct aq_softc *sc, struct aq_queues *aq)
 	aq_dmamem_free(sc, &rx->rx_mem);
 }
 
+/*
+ * Toggle the RX descriptor cache init bit.
+ * The NIC caches RX descriptors internally; this forces it to re-read
+ * them from memory.  Called when bringing the interface up or down.
+ */
 void
 aq_invalidate_rx_desc_cache(struct aq_softc *sc)
 {
@@ -3698,6 +4222,14 @@ aq_invalidate_rx_desc_cache(struct aq_softc *sc)
 	    (cache & RX_DMA_DESC_CACHE_INIT) ^ RX_DMA_DESC_CACHE_INIT);
 }
 
+/*
+ * Bring the interface up.
+ * Invalidates the RX descriptor cache, allocates and initializes all
+ * queue pairs (DMA rings, slot arrays, hardware ring registers),
+ * programs the MAC address, enables hardware checksum offload,
+ * enables interrupts and TX/RX buffers, initializes the rxring
+ * accounting, fills RX rings with mbufs, and marks queues active.
+ */
 int
 aq_up(struct aq_softc *sc)
 {
@@ -3766,6 +4298,13 @@ downqueues:
 	return ENOMEM;
 }
 
+/*
+ * Bring the interface down.
+ * Clears IFF_RUNNING, disables TX/RX interrupts, waits for any
+ * in-flight interrupt handlers to complete (intr_barrier), disables
+ * the RX buffer, tears down all queue pairs, and invalidates the
+ * RX descriptor cache.
+ */
 void
 aq_down(struct aq_softc *sc)
 {
@@ -3786,6 +4325,12 @@ aq_down(struct aq_softc *sc)
 	aq_invalidate_rx_desc_cache(sc);
 }
 
+/*
+ * Enable or reconfigure the interrupt mask.
+ * Builds a bitmask of all active interrupt sources (TX/RX queues
+ * and link status) and writes it to the interrupt mask register.
+ * Also clears any pending interrupts.
+ */
 void
 aq_enable_intr(struct aq_softc *sc, int link, int txrx)
 {
@@ -3806,6 +4351,11 @@ aq_enable_intr(struct aq_softc *sc, int link, int txrx)
 	AQ_WRITE_REG(sc, AQ_INTR_STATUS_CLR_REG, 0xffffffff);
 }
 
+/*
+ * Report current media status (ifconfig / ifmedia).
+ * Queries the firmware for the current negotiated link speed and
+ * flow control, then translates to the ifmedia framework constants.
+ */
 void
 aq_ifmedia_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 {
@@ -3855,6 +4405,11 @@ aq_ifmedia_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 	}
 }
 
+/*
+ * Handle media change request (e.g. "ifconfig aq0 media 1000baseT").
+ * Translates the ifmedia selection to the driver's link speed enum
+ * and calls aq_set_linkmode() to reprogram the firmware.
+ */
 int
 aq_ifmedia_change(struct ifnet *ifp)
 {
@@ -3900,6 +4455,12 @@ aq_ifmedia_change(struct ifnet *ifp)
 	return aq_set_linkmode(sc, rate, fc, AQ_EEE_DISABLE);
 }
 
+/*
+ * Check for link state transitions and notify the network stack.
+ * Called from the link status interrupt handler.  Queries the firmware
+ * for the current speed; if it changed, calls if_link_state_change()
+ * so the routing table and userland (dhclient, etc.) are notified.
+ */
 void
 aq_update_link_status(struct aq_softc *sc)
 {
@@ -3923,6 +4484,10 @@ aq_update_link_status(struct aq_softc *sc)
 	}
 }
 
+/*
+ * Report RX ring info (SIOCGIFRXR ioctl).
+ * Returns per-queue buffer size and ring state for monitoring tools.
+ */
 int
 aq_rxrinfo(struct aq_softc *sc, struct if_rxrinfo *ifri)
 {
@@ -3946,6 +4511,18 @@ aq_rxrinfo(struct aq_softc *sc, struct if_rxrinfo *ifri)
 	return (error);
 }
 
+/*
+ * ioctl handler for the network interface.
+ * Handles standard network ioctls:
+ *   SIOCSIFADDR   - set address (bring up if needed)
+ *   SIOCSIFFLAGS  - set flags (up/down, promisc, etc.)
+ *   SIOCSIFMEDIA  - set media type
+ *   SIOCGIFMEDIA  - get media type
+ *   SIOCGIFRXR    - get RX ring info
+ *   SIOCGIFSFFPAGE - read SFP module data (fibre only)
+ * Falls through to ether_ioctl() for multicast and other Ethernet ops.
+ * On ENETRESET, calls aq_iff() to reprogram the packet filter.
+ */
 int
 aq_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 {
@@ -4002,6 +4579,12 @@ aq_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 	return error;
 }
 
+/*
+ * Program one entry in the AQ2 Action Resolver Table.
+ * Acquires the ART semaphore for mutual exclusion with firmware,
+ * writes the tag/mask/action triple at the given index (offset by
+ * the base index read from firmware capabilities).
+ */
 int
 aq2_filter_art_set(struct aq_softc *sc, uint32_t idx,
     uint32_t tag, uint32_t mask, uint32_t action)
@@ -4028,6 +4611,16 @@ aq2_filter_art_set(struct aq_softc *sc, uint32_t idx,
 	return error;
 }
 
+/*
+ * Update interface filter flags (promiscuous/multicast).
+ * Called when IFF_PROMISC or the multicast list changes.
+ *
+ * Three modes:
+ *   1. Promiscuous: accept all packets (disable ART drop rules on AQ2)
+ *   2. All-multicast: too many multicast addrs or ranges; use HW filter
+ *   3. Normal: program individual multicast addresses into HW MAC filters
+ *      (up to AQ_HW_MAC_NUM entries; index 0 is the primary MAC)
+ */
 void
 aq_iff(struct aq_softc *sc)
 {
@@ -4080,6 +4673,10 @@ aq_iff(struct aq_softc *sc)
 	}
 }
 
+/*
+ * Wait for an SMBus transaction to complete.
+ * Used by aq_get_sffpage() for SFP/SFP+ module access on fibre variants.
+ */
 int
 aq_smb_bus_wait_result(struct aq_softc *sc, int ack)
 {
@@ -4095,6 +4692,12 @@ aq_smb_bus_wait_result(struct aq_softc *sc, int ack)
 	return 0;
 }
 
+/*
+ * Read a page of data from an SFP/SFP+ transceiver module via SMBus.
+ * Implements the I2C read protocol: START, write address, REPEAT START,
+ * read 256 bytes of data, NACK last byte, STOP.  Used by the
+ * SIOCGIFSFFPAGE ioctl for "ifconfig aq0 sff" SFP diagnostics.
+ */
 int
 aq_get_sffpage(struct aq_softc *sc, struct if_sffpage *sff)
 {
@@ -4161,6 +4764,12 @@ aq_get_sffpage(struct aq_softc *sc, struct if_sffpage *sff)
 	return error;
 }
 
+/*
+ * Allocate a contiguous DMA-accessible memory region.
+ * Used for TX/RX descriptor rings.  Performs the full bus_dma(9)
+ * allocation sequence: create map -> alloc memory -> map to KVA -> load.
+ * On failure at any step, unwinds the partial allocation.
+ */
 int
 aq_dmamem_alloc(struct aq_softc *sc, struct aq_dmamem *aqm,
     bus_size_t size, u_int align)
@@ -4194,6 +4803,7 @@ destroy:
 	return (1);
 }
 
+/* Free a DMA memory region (reverse of aq_dmamem_alloc). */
 void
 aq_dmamem_free(struct aq_softc *sc, struct aq_dmamem *aqm)
 {
