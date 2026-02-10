@@ -1373,6 +1373,8 @@ int	aq_ioctl(struct ifnet *, u_long, caddr_t);
 int	aq_up(struct aq_softc *);
 void	aq_down(struct aq_softc *);
 void	aq_iff(struct aq_softc *);
+int	aq_tx_offload(struct mbuf *, uint32_t *, uint32_t *,
+	    uint32_t *, uint32_t *);
 void	aq_start(struct ifqueue *);
 void	aq_ifmedia_status(struct ifnet *, struct ifmediareq *);
 int	aq_ifmedia_change(struct ifnet *);
@@ -3768,6 +3770,81 @@ aq_txeof(struct aq_softc *sc, struct aq_txring *tx)
 }
 
 /*
+ * Set up TX offload fields for a packet.
+ *
+ * Populates the data descriptor (ctl1/ctl2) and context descriptor
+ * (txc_ctl1/txc_ctl2) fields for VLAN insertion, TSO, and checksum
+ * offload.  Returns non-zero if a context descriptor is needed.
+ */
+int
+aq_tx_offload(struct mbuf *m, uint32_t *ctl1, uint32_t *ctl2,
+    uint32_t *txc_ctl1, uint32_t *txc_ctl2)
+{
+	struct ether_extracted ext;
+	uint32_t l2len, l3len, l4len, cmd;
+	uint32_t paylen, mss;
+	int need_txc = 0;
+
+#if NVLAN > 0
+	if (m->m_flags & M_VLANTAG) {
+		*txc_ctl1 |= (m->m_pkthdr.ether_vtag <<
+		    AQ_TXDESC_CTL1_VLAN_SHIFT);
+		*ctl1 |= AQ_TXDESC_CTL1_CMD_VLAN;
+		need_txc = 1;
+	}
+#endif
+
+	if (!(m->m_pkthdr.csum_flags & M_TCP_TSO)) {
+		if (m->m_pkthdr.csum_flags & M_IPV4_CSUM_OUT)
+			*ctl1 |= AQ_TXDESC_CTL1_CMD_IP4CSUM;
+		if (m->m_pkthdr.csum_flags &
+		    (M_TCP_CSUM_OUT | M_UDP_CSUM_OUT))
+			*ctl1 |= AQ_TXDESC_CTL1_CMD_L4CSUM;
+		return need_txc;
+	}
+
+	ether_extract_headers(m, &ext);
+	if (!ext.tcp || m->m_pkthdr.ph_mss == 0) {
+		tcpstat_inc(tcps_outbadtso);
+		return need_txc;
+	}
+
+	cmd = AQ_TXC_CMD_LSO;
+	if (ext.ip4)
+		l2len = (uint8_t *)ext.ip4 - mtod(m, uint8_t *);
+	else if (ext.ip6)
+		l2len = (uint8_t *)ext.ip6 - mtod(m, uint8_t *);
+		cmd |= AQ_TXC_CMD_IPV6;
+	else {
+		tcpstat_inc(tcps_outbadtso);
+		return need_txc;
+	}
+
+	l3len = ext.iphlen;
+	l4len = ext.tcphlen;
+	mss = m->m_pkthdr.ph_mss;
+
+	*txc_ctl1 |= (cmd << AQ_TXC_CTL1_CMD_SHIFT);
+	*txc_ctl1 |= (l2len << AQ_TXC_CTL1_L2LEN_SHIFT);
+	*txc_ctl1 |= ((l3len & 0x1) << 31);
+
+	*txc_ctl2 |= ((l3len >> 1) << AQ_TXC_CTL2_L3LEN_SHIFT);
+	*txc_ctl2 |= (l4len << AQ_TXC_CTL2_L4LEN_SHIFT);
+	*txc_ctl2 |= (mss << AQ_TXC_CTL2_MSS_SHIFT);
+
+	*ctl1 |= AQ_TXDESC_CTL1_CMD_LSO;
+	if (ext.ip4)
+		*ctl1 |= AQ_TXDESC_CTL1_CMD_IP4CSUM;
+	*ctl1 |= AQ_TXDESC_CTL1_CMD_L4CSUM;
+
+	paylen = m->m_pkthdr.len - l2len - l3len - l4len;
+	*ctl2 = paylen << AQ_TXDESC_CTL2_LEN_SHIFT;
+	tcpstat_add(tcps_outpkttso, (paylen + mss - 1) / mss);
+
+	return 1;
+}
+
+/*
  * Transmit start function (ifq_start callback).
  *
  * Called by the network stack when packets are enqueued.  Dequeues
@@ -3795,7 +3872,6 @@ aq_start(struct ifqueue *ifq)
 	struct mbuf *m;
 	uint32_t idx, free, used, ctl1, ctl2;
 	uint32_t txc_ctl1, txc_ctl2;
-	int need_txc;
 	int error, i;
 
 	if (!LINK_STATE_IS_UP(sc->sc_arpcom.ac_if.if_link_state)) {
@@ -3852,72 +3928,8 @@ aq_start(struct ifqueue *ifq)
 		ctl1 = AQ_TXDESC_CTL1_TYPE_TXD | AQ_TXDESC_CTL1_CMD_FCS;
 		txc_ctl1 = 0;
 		txc_ctl2 = 0;
-		need_txc = 0;
 
-#if NVLAN > 0
-		if (m->m_flags & M_VLANTAG) {
-			txc_ctl1 |= (m->m_pkthdr.ether_vtag <<
-			    AQ_TXDESC_CTL1_VLAN_SHIFT);
-			ctl1 |= AQ_TXDESC_CTL1_CMD_VLAN;
-			need_txc = 1;
-		}
-#endif
-
-		if (m->m_pkthdr.csum_flags & M_TCP_TSO) {
-			struct ether_extracted ext;
-
-			ether_extract_headers(m, &ext);
-
-			if (ext.tcp && m->m_pkthdr.ph_mss > 0) {
-				uint32_t l2len, l3len, l4len, cmd;
-				uint32_t paylen, mss;
-
-				if (ext.ip4)
-					l2len = (uint8_t *)ext.ip4 -
-					    mtod(m, uint8_t *);
-				else if (ext.ip6)
-					l2len = (uint8_t *)ext.ip6 -
-					    mtod(m, uint8_t *);
-				else {
-					tcpstat_inc(tcps_outbadtso);
-					goto notso;
-				}
-				l3len = ext.iphlen;
-				l4len = ext.tcphlen;
-				mss = m->m_pkthdr.ph_mss;
-
-				cmd = AQ_TXC_CMD_LSO;
-				if (ext.ip6 != NULL)
-					cmd |= AQ_TXC_CMD_IPV6;
-
-				txc_ctl1 |= (cmd << AQ_TXC_CTL1_CMD_SHIFT);
-				txc_ctl1 |= (l2len << AQ_TXC_CTL1_L2LEN_SHIFT);
-				txc_ctl1 |= ((l3len & 0x1) << 31);
-
-				txc_ctl2 |= ((l3len >> 1) << AQ_TXC_CTL2_L3LEN_SHIFT);
-				txc_ctl2 |= (l4len << AQ_TXC_CTL2_L4LEN_SHIFT);
-				txc_ctl2 |= (mss << AQ_TXC_CTL2_MSS_SHIFT);
-
-				ctl1 |= AQ_TXDESC_CTL1_CMD_LSO;
-				if (ext.ip4)
-					ctl1 |=
-					    AQ_TXDESC_CTL1_CMD_IP4CSUM;
-				ctl1 |= AQ_TXDESC_CTL1_CMD_L4CSUM;
-				need_txc = 1;
-
-				paylen = m->m_pkthdr.len - l2len -
-				    l3len - l4len;
-				ctl2 = paylen <<
-				    AQ_TXDESC_CTL2_LEN_SHIFT;
-				tcpstat_add(tcps_outpkttso,
-				    (paylen + mss - 1) / mss);
-			} else {
-				tcpstat_inc(tcps_outbadtso);
-			}
-		}
- notso:
-
-		if (need_txc) {
+		if (aq_tx_offload(m, &ctl1, &ctl2, &txc_ctl1, &txc_ctl2)) {
 			txd = ring + idx;
 			txd->buf_addr = 0;
 			txd->ctl1 = htole32(AQ_TXDESC_CTL1_TYPE_TXC |
@@ -3929,14 +3941,6 @@ aq_start(struct ifqueue *ifq)
 			if (idx == AQ_TXD_NUM)
 				idx = 0;
 			used++;
-		}
-
-		if (!(m->m_pkthdr.csum_flags & M_TCP_TSO)) {
-			if (m->m_pkthdr.csum_flags & M_IPV4_CSUM_OUT)
-				ctl1 |= AQ_TXDESC_CTL1_CMD_IP4CSUM;
-			if (m->m_pkthdr.csum_flags &
-			    (M_TCP_CSUM_OUT | M_UDP_CSUM_OUT))
-				ctl1 |= AQ_TXDESC_CTL1_CMD_L4CSUM;
 		}
 
 		for (i = 0; i < as->as_map->dm_nsegs; i++) {
