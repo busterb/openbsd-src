@@ -179,6 +179,10 @@
 #define AQ_GEN_INTR_MAP_REG(i)			(0x2180 + (i) * 4)
 #define  AQ_B0_ERR_INT				8U
 
+#define ITR_RSC_EN_REG				0x2200
+#define ITR_RSC_DELAY_REG			0x2204
+#define  ITR_RSC_DELAY				0x0000000f
+
 #define AQ_INTR_CTRL_REG			0x2300
 #define  AQ_INTR_CTRL_IRQMODE			((1 << 0) | (1 << 1))
 #define AQ_INTR_CTRL_IRQMODE_LEGACY		0
@@ -279,6 +283,23 @@
 #define RPO_HWCSUM_REG				0x5580
 #define  RPO_HWCSUM_L4CSUM_EN			(1 << 0)
 #define  RPO_HWCSUM_IP4CSUM_EN			(1 << 1)
+
+#define RPO_LRO_EN_REG				0x5590
+#define RPO_LRO_CONF_REG			0x5594
+#define  RPO_LRO_CONF_PKT_MIN			0x0000001f
+#define  RPO_LRO_CONF_TOT_DSC_LMT		0x00000060
+#define  RPO_LRO_CONF_QSES_LMT			0x00003000
+#define  RPO_LRO_CONF_PTOPT_EN			0x00008000
+#define RPO_LRO_RSC_MAX_REG			0x5598
+
+/* RPO_LRO_DESC_MAX_REG: 4 regs, 8 rings each, 4 bits/ring (2-bit value) */
+#define RPO_LRO_DESC_MAX_REG(i)		(0x55a0 + ((i) / 8) * 4)
+#define  RPO_LRO_DESC_MAX_MASK(i)		(0x3U << (((i) % 8) * 4))
+
+#define RPO_LRO_TIMER_REG			0x5620
+#define  RPO_LRO_TIMER_MAX_IVAL			0x000003ff
+#define  RPO_LRO_TIMER_INA_IVAL			0x000ffc00
+#define  RPO_LRO_TIMER_TB_DIV			0xfff00000
 
 #define RPB_RPF_RX_REG				0x5700
 #define  RPB_RPF_RX_TC_MODE			(1 << 8)
@@ -901,6 +922,7 @@ struct aq_rx_desc_wb {
 #define AQ_RXDESC_TYPE_RSSTYPE	0x000f
 #define AQ_RXDESC_TYPE_ETHER	0x0030
 #define AQ_RXDESC_TYPE_PROTO	0x01c0
+#define AQ_RXDESC_TYPE_PROTO_TCP	(2 << 6)
 #define AQ_RXDESC_TYPE_VLAN	(1 << 9)
 #define AQ_RXDESC_TYPE_VLAN2	(1 << 10)
 #define AQ_RXDESC_TYPE_DMA_ERR	(1 << 12)
@@ -1398,6 +1420,8 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 	ifp->if_capabilities = IFCAP_VLAN_MTU | IFCAP_CSUM_IPv4 |
 	    IFCAP_CSUM_UDPv4 | IFCAP_CSUM_UDPv6 | IFCAP_CSUM_TCPv4 |
 	    IFCAP_CSUM_TCPv6 | IFCAP_TSOv4 | IFCAP_TSOv6;
+	ifp->if_capabilities |= IFCAP_LRO;
+	ifp->if_xflags |= IFXF_LRO;
 #if NVLAN > 0
 	ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING;
 #endif
@@ -3372,16 +3396,12 @@ aq_start(struct ifqueue *ifq)
 					cmd |= AQ_TXC_CMD_IPV6;
 
 				txc_ctl1 |= (cmd << AQ_TXC_CTL1_CMD_SHIFT);
-				txc_ctl1 |= (l2len <<
-				    AQ_TXC_CTL1_L2LEN_SHIFT);
+				txc_ctl1 |= (l2len << AQ_TXC_CTL1_L2LEN_SHIFT);
 				txc_ctl1 |= ((l3len & 0x1) << 31);
 
-				txc_ctl2 |= ((l3len >> 1) <<
-				    AQ_TXC_CTL2_L3LEN_SHIFT);
-				txc_ctl2 |= (l4len <<
-				    AQ_TXC_CTL2_L4LEN_SHIFT);
-				txc_ctl2 |= (mss <<
-				    AQ_TXC_CTL2_MSS_SHIFT);
+				txc_ctl2 |= ((l3len >> 1) << AQ_TXC_CTL2_L3LEN_SHIFT);
+				txc_ctl2 |= (l4len << AQ_TXC_CTL2_L4LEN_SHIFT);
+				txc_ctl2 |= (mss << AQ_TXC_CTL2_MSS_SHIFT);
 
 				ctl1 |= AQ_TXDESC_CTL1_CMD_LSO;
 				if (ext.ip4)
@@ -3682,6 +3702,7 @@ int
 aq_up(struct aq_softc *sc)
 {
 	struct ifnet *ifp = &sc->sc_arpcom.ac_if;
+	uint32_t lro_en;
 	int i;
 
 	aq_invalidate_rx_desc_cache(sc);
@@ -3701,6 +3722,26 @@ aq_up(struct aq_softc *sc)
 
 	AQ_WRITE_REG_BIT(sc, RPO_HWCSUM_REG, RPO_HWCSUM_IP4CSUM_EN, 1);
 	AQ_WRITE_REG_BIT(sc, RPO_HWCSUM_REG, RPO_HWCSUM_L4CSUM_EN, 1);
+
+	/* Hardware LRO / Receive Side Coalescing */
+	for (i = 0; i < 32; i++)
+		AQ_WRITE_REG_BIT(sc, RPO_LRO_DESC_MAX_REG(i),
+		    RPO_LRO_DESC_MAX_MASK(i), 0x3);
+	AQ_WRITE_REG_BIT(sc, RPO_LRO_TIMER_REG, RPO_LRO_TIMER_TB_DIV, 0x61a);
+	AQ_WRITE_REG_BIT(sc, RPO_LRO_TIMER_REG, RPO_LRO_TIMER_INA_IVAL, 0);
+	AQ_WRITE_REG_BIT(sc, RPO_LRO_TIMER_REG, RPO_LRO_TIMER_MAX_IVAL, 50);
+	AQ_WRITE_REG_BIT(sc, RPO_LRO_CONF_REG, RPO_LRO_CONF_QSES_LMT, 1);
+	AQ_WRITE_REG_BIT(sc, RPO_LRO_CONF_REG, RPO_LRO_CONF_TOT_DSC_LMT, 2);
+	AQ_WRITE_REG_BIT(sc, RPO_LRO_CONF_REG, RPO_LRO_CONF_PTOPT_EN, 1);
+	AQ_WRITE_REG_BIT(sc, RPO_LRO_CONF_REG, RPO_LRO_CONF_PKT_MIN, 10);
+	AQ_WRITE_REG(sc, RPO_LRO_RSC_MAX_REG, 1);
+
+	lro_en = ISSET(ifp->if_xflags, IFXF_LRO) ? 0xffffffff : 0;
+	DPRINTF(("%s: LRO is %s", DEVNAME(sc), lro_en ? "enabled" : "disabled"));
+	AQ_WRITE_REG(sc, RPO_LRO_EN_REG, lro_en);
+	AQ_WRITE_REG(sc, ITR_RSC_EN_REG, lro_en);
+
+	AQ_WRITE_REG_BIT(sc, ITR_RSC_DELAY_REG, ITR_RSC_DELAY, 1);
 
 	SET(ifp->if_flags, IFF_RUNNING);
 	aq_enable_intr(sc, 1, 1);
