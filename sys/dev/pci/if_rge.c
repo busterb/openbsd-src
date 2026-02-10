@@ -1102,7 +1102,7 @@ rge_allocmem(struct rge_softc *sc)
 
 	/* Allocate DMA'able memory for the TX ring. */
 	error = bus_dmamap_create(sc->sc_dmat, RGE_TX_LIST_SZ, 1,
-	    RGE_TX_LIST_SZ, 0, BUS_DMA_NOWAIT | BUS_DMA_ALLOCNOW,
+	    RGE_TX_LIST_SZ, 0, BUS_DMA_NOWAIT | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
 	    &q->q_tx.rge_tx_list_map);
 	if (error) {
 		printf("%s: can't create TX list map\n", sc->sc_dev.dv_xname);
@@ -1142,7 +1142,7 @@ rge_allocmem(struct rge_softc *sc)
 	for (i = 0; i < RGE_TX_LIST_CNT; i++) {
 		error = bus_dmamap_create(sc->sc_dmat, RGE_JUMBO_FRAMELEN,
 		    RGE_TX_NSEGS, RGE_JUMBO_FRAMELEN, 0,
-		    BUS_DMA_NOWAIT | BUS_DMA_ALLOCNOW,
+		    BUS_DMA_NOWAIT | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
 		    &q->q_tx.rge_txq[i].txq_dmamap);
 		if (error) {
 			printf("%s: can't create DMA map for TX\n",
@@ -1153,7 +1153,7 @@ rge_allocmem(struct rge_softc *sc)
 
 	/* Allocate DMA'able memory for the RX ring. */
 	error = bus_dmamap_create(sc->sc_dmat, RGE_RX_LIST_SZ, 1,
-	    RGE_RX_LIST_SZ, 0, BUS_DMA_NOWAIT | BUS_DMA_ALLOCNOW,
+	    RGE_RX_LIST_SZ, 0, BUS_DMA_NOWAIT | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
 	    &q->q_rx.rge_rx_list_map);
 	if (error) {
 		printf("%s: can't create RX list map\n", sc->sc_dev.dv_xname);
@@ -1192,7 +1192,7 @@ rge_allocmem(struct rge_softc *sc)
 	/* Create DMA maps for RX buffers. */
 	for (i = 0; i < RGE_RX_LIST_CNT; i++) {
 		error = bus_dmamap_create(sc->sc_dmat, RGE_JUMBO_FRAMELEN, 1,
-		    RGE_JUMBO_FRAMELEN, 0, BUS_DMA_NOWAIT | BUS_DMA_ALLOCNOW,
+		    RGE_JUMBO_FRAMELEN, 0, BUS_DMA_NOWAIT | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
 		    &q->q_rx.rge_rxq[i].rxq_dmamap);
 		if (error) {
 			printf("%s: can't create DMA map for RX\n",
