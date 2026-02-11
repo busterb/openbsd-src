@@ -3812,10 +3812,10 @@ aq_tx_offload(struct mbuf *m, uint32_t *ctl1, uint32_t *ctl2,
 	cmd = AQ_TXC_CMD_LSO;
 	if (ext.ip4)
 		l2len = (uint8_t *)ext.ip4 - mtod(m, uint8_t *);
-	else if (ext.ip6)
+	else if (ext.ip6) {
 		l2len = (uint8_t *)ext.ip6 - mtod(m, uint8_t *);
 		cmd |= AQ_TXC_CMD_IPV6;
-	else {
+	} else {
 		tcpstat_inc(tcps_outbadtso);
 		return need_txc;
 	}
