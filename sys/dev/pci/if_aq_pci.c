@@ -1077,6 +1077,8 @@ struct aq_rx_desc_wb {
 #define AQ_RXDESC_STATUS_V4_SUM_NG (1 << 3)
 #define AQ_RXDESC_STATUS_L4_SUM_ERR (1 << 4)
 #define AQ_RXDESC_STATUS_L4_SUM_OK (1 << 5)
+#define AQ_RXDESC_STATUS_RSCCNT	0xf000
+#define AQ_RXDESC_STATUS_RSCCNT_SHIFT 12
 	uint16_t		pkt_len;
 	uint16_t		next_desc_ptr;
 	uint16_t		vlan;
@@ -3682,6 +3684,13 @@ aq_rxeof(struct aq_softc *sc, struct aq_rxring *rx)
 				ifp->if_ierrors++;
 				m_freem(m);
 			} else {
+				if (status & AQ_RXDESC_STATUS_RSCCNT) {
+					tcpstat_inc(tcps_inhwlro);
+					tcpstat_add(tcps_inpktlro,
+					    (status &
+					    AQ_RXDESC_STATUS_RSCCNT) >>
+					    AQ_RXDESC_STATUS_RSCCNT_SHIFT);
+				}
 				ml_enqueue(&ml, m);
 			}
 
