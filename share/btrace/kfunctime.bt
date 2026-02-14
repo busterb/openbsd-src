@@ -1,0 +1,17 @@
+/*	$OpenBSD$	*/
+
+/*
+ * kfunctime.bt	Measure kernel function call duration.
+ *
+ * Times calls to dofilewritev() from entry to return and prints
+ * the elapsed time in nanoseconds.  Change the function name to
+ * measure other kernel functions.
+ */
+kprobe:dofilewritev {
+	@start[tid] = nsecs;
+}
+
+kretprobe:dofilewritev /@start[tid]/ {
+	printf("write took %d ns\n", nsecs - @start[tid]);
+	delete(@start[tid]);
+}
