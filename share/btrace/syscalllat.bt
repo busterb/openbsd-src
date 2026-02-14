@@ -1,0 +1,16 @@
+/*	$OpenBSD$	*/
+
+/*
+ * syscalllat.bt	Histogram of syscall latency.
+ *
+ * Measures the time from syscall entry to return and records
+ * the elapsed nanoseconds in a power-of-two histogram.
+ */
+syscall:*:entry {
+	@start[tid] = nsecs;
+}
+
+syscall:*:return /@start[tid]/ {
+	@ = hist(nsecs - @start[tid]);
+	delete(@start[tid]);
+}
