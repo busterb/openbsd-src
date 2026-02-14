@@ -17,28 +17,18 @@
  */
 
 #include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
 #include <sys/ctf.h>
+#include <sys/exec_elf.h>
+
+#include <ctf.h>
 
 #include <err.h>
-#include <fcntl.h>
-#include <gelf.h>
-#include <libelf.h>
 #include <locale.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#ifdef ZLIB
-#include <zlib.h>
-#endif /* ZLIB */
-
-#ifndef nitems
-#define nitems(_a)	(sizeof((_a)) / sizeof((_a)[0]))
-#endif
 
 #define DUMP_OBJECT	(1 << 0)
 #define DUMP_FUNCTION	(1 << 1)
@@ -49,21 +39,21 @@
 #define DUMP_TYPE	(1 << 6)
 
 int		 dump(const char *, uint8_t);
-int		 isctf(const char *, size_t);
 __dead void	 usage(void);
 
-int		 ctf_dump(const char *, size_t, uint8_t);
-void		 ctf_dump_type(struct ctf_header *, const char *, size_t,
-		     uint32_t, uint32_t *, uint32_t);
-const char	*ctf_kind2name(uint16_t);
-const char	*ctf_enc2name(uint16_t);
-const char	*ctf_fpenc2name(uint16_t);
-const char	*ctf_off2name(struct ctf_header *, const char *, size_t,
-		     uint32_t);
+int		 ctf_dump(ctf_file_t *, uint8_t);
+void		 ctf_dump_type(ctf_file_t *, uint32_t *, uint32_t);
 
-char		*decompress(const char *, size_t, size_t);
-int		 elf_dump(uint8_t);
-const char	*elf_idx2sym(size_t *, uint8_t);
+static const char *
+namestr(ctf_file_t *cf, uint32_t offset)
+{
+	const char	*name;
+
+	name = ctf_stroff2name(cf, offset);
+	if (name == NULL)
+		return "(anon)";
+	return name;
+}
 
 int
 main(int argc, char *argv[])
@@ -112,251 +102,66 @@ main(int argc, char *argv[])
 	if (flags == 0)
 		flags = 0xff;
 
-	if (elf_version(EV_CURRENT) == EV_NONE)
-		errx(1, "elf_version: %s", elf_errmsg(-1));
-
 	while ((filename = *argv++) != NULL)
 		error |= dump(filename, flags);
 
 	return error;
 }
 
-Elf	*e;
-Elf_Scn	*scnsymtab;
-size_t	 strtabndx, strtabsz, nsymb;
-
 int
 dump(const char *path, uint8_t flags)
 {
-	struct stat	 st;
-	char		*p;
-	int		 fd, error = 1;
+	ctf_file_t	*cf;
+	int		 error;
 
-	fd = open(path, O_RDONLY);
-	if (fd == -1) {
-		warn("open");
+	cf = ctf_open(path);
+	if (cf == NULL) {
+		warnx("failed to open %s", path);
 		return 1;
 	}
 
-	if ((e = elf_begin(fd, ELF_C_READ, NULL)) == NULL) {
-		warnx("elf_begin: %s", elf_errmsg(-1));
-		goto done;
-	}
-
-	if (elf_kind(e) == ELF_K_ELF) {
-		error = elf_dump(flags);
-		elf_end(e);
-		goto done;
-	}
-	elf_end(e);
-
-	if (fstat(fd, &st) == -1) {
-		warn("fstat");
-		goto done;
-	}
-	if ((uintmax_t)st.st_size > SIZE_MAX) {
-		warnx("file too big to fit memory");
-		goto done;
-	}
-
-	p = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-	if (p == MAP_FAILED)
-		err(1, "mmap");
-
-	if (isctf(p, st.st_size))
-		error = ctf_dump(p, st.st_size, flags);
-
-	munmap(p, st.st_size);
-
- done:
-	close(fd);
-	return error;
-}
-
-const char *
-elf_idx2sym(size_t *idx, uint8_t type)
-{
-	GElf_Sym	 sym;
-	Elf_Data	*data;
-	char		*name;
-	size_t		 i;
-
-	if (scnsymtab == NULL || strtabndx == 0)
-		return NULL;
-
-	data = NULL;
-	while ((data = elf_rawdata(scnsymtab, data)) != NULL) {
-		for (i = *idx + 1; i < nsymb; i++) {
-			if (gelf_getsym(data, i, &sym) != &sym)
-				continue;
-			if (GELF_ST_TYPE(sym.st_info) != type)
-				continue;
-			if (sym.st_name >= strtabsz)
-				break;
-			if ((name = elf_strptr(e, strtabndx,
-			    sym.st_name)) == NULL)
-				continue;
-
-			*idx = i;
-			return name;
-		}
-	}
-
-	return NULL;
-}
-
-int
-elf_dump(uint8_t flags)
-{
-	GElf_Shdr	 shdr;
-	Elf_Scn		*scn, *scnctf;
-	Elf_Data	*data;
-	char		*name;
-	size_t		 shstrndx;
-	int		 error = 0;
-
-	if (elf_getshdrstrndx(e, &shstrndx) != 0) {
-		warnx("elf_getshdrstrndx: %s", elf_errmsg(-1));
-		return 1;
-	}
-
-	scn = scnctf = NULL;
-	while ((scn = elf_nextscn(e, scn)) != NULL) {
-		if (gelf_getshdr(scn, &shdr) != &shdr) {
-			warnx("elf_getshdr: %s", elf_errmsg(-1));
-			return 1;
-		}
-
-		if ((name = elf_strptr(e, shstrndx, shdr.sh_name)) == NULL) {
-			warnx("elf_strptr: %s", elf_errmsg(-1));
-			return 1;
-		}
-
-		if (strcmp(name, ELF_CTF) == 0)
-			scnctf = scn;
-
-		if (strcmp(name, ELF_SYMTAB) == 0 &&
-		    shdr.sh_type == SHT_SYMTAB && shdr.sh_entsize != 0) {
-			scnsymtab = scn;
-			nsymb = shdr.sh_size / shdr.sh_entsize;
-		}
-
-		if (strcmp(name, ELF_STRTAB) == 0 &&
-		    shdr.sh_type == SHT_STRTAB) {
-			strtabndx = elf_ndxscn(scn);
-			strtabsz = shdr.sh_size;
-		}
-	}
-
-	if (scnctf == NULL) {
-		warnx("%s section not found", ELF_CTF);
-		return 1;
-	}
-
-	if (scnsymtab == NULL)
-		warnx("symbol table not found");
-
-	data = NULL;
-	while ((data = elf_rawdata(scnctf, data)) != NULL) {
-		if (data->d_buf == NULL) {
-			warnx("%s section size is zero", ELF_CTF);
-			return 1;
-		}
-
-		if (isctf(data->d_buf, data->d_size))
-			error |= ctf_dump(data->d_buf, data->d_size, flags);
-	}
+	error = ctf_dump(cf, flags);
+	ctf_close(cf);
 
 	return error;
 }
 
 int
-isctf(const char *p, size_t filesize)
+ctf_dump(ctf_file_t *cf, uint8_t flags)
 {
-	struct ctf_header	 cth;
+	const struct ctf_header	*cth;
+	const char		*data;
 	size_t			 dlen;
 
-	if (filesize < sizeof(struct ctf_header)) {
-		warnx("file too small to be CTF");
-		return 0;
-	}
-
-	memcpy(&cth, p, sizeof(struct ctf_header));
-	if (cth.cth_magic != CTF_MAGIC || cth.cth_version != CTF_VERSION)
-		return 0;
-
-	dlen = cth.cth_stroff + cth.cth_strlen;
-	if (dlen > filesize && !(cth.cth_flags & CTF_F_COMPRESS)) {
-		warnx("bogus file size");
-		return 0;
-	}
-
-	if ((cth.cth_lbloff & 3) || (cth.cth_objtoff & 1) ||
-	    (cth.cth_funcoff & 1) || (cth.cth_typeoff & 3)) {
-		warnx("wrongly aligned offset");
-		return 0;
-	}
-
-	if ((cth.cth_lbloff >= dlen) || (cth.cth_objtoff >= dlen) ||
-	    (cth.cth_funcoff >= dlen) || (cth.cth_typeoff >= dlen)) {
-		warnx("truncated file");
-		return 0;
-	}
-
-	if ((cth.cth_lbloff > cth.cth_objtoff) ||
-	    (cth.cth_objtoff > cth.cth_funcoff) ||
-	    (cth.cth_funcoff > cth.cth_typeoff) ||
-	    (cth.cth_typeoff > cth.cth_stroff)) {
-		warnx("corrupted file");
-		return 0;
-	}
-
-	return 1;
-}
-
-int
-ctf_dump(const char *p, size_t size, uint8_t flags)
-{
-	struct ctf_header	 cth;
-	size_t			 dlen;
-	char			*data;
-
-	memcpy(&cth, p, sizeof(struct ctf_header));
-	dlen = cth.cth_stroff + cth.cth_strlen;
-	if (cth.cth_flags & CTF_F_COMPRESS) {
-		data = decompress(p + sizeof(cth), size - sizeof(cth), dlen);
-		if (data == NULL)
-			return 1;
-	} else {
-		data = (char *)p + sizeof(cth);
-	}
+	cth = ctf_header(cf);
+	data = ctf_data(cf, &dlen);
 
 	if (flags & DUMP_HEADER) {
-		printf("  cth_magic    = 0x%04x\n", cth.cth_magic);
-		printf("  cth_version  = %u\n", cth.cth_version);
-		printf("  cth_flags    = 0x%02x\n", cth.cth_flags);
+		printf("  cth_magic    = 0x%04x\n", cth->cth_magic);
+		printf("  cth_version  = %u\n", cth->cth_version);
+		printf("  cth_flags    = 0x%02x\n", cth->cth_flags);
 		printf("  cth_parlabel = %s\n",
-		    ctf_off2name(&cth, data, dlen, cth.cth_parlabel));
+		    namestr(cf, cth->cth_parlabel));
 		printf("  cth_parname  = %s\n",
-		    ctf_off2name(&cth, data, dlen, cth.cth_parname));
-		printf("  cth_lbloff   = %u\n", cth.cth_lbloff);
-		printf("  cth_objtoff  = %u\n", cth.cth_objtoff);
-		printf("  cth_funcoff  = %u\n", cth.cth_funcoff);
-		printf("  cth_typeoff  = %u\n", cth.cth_typeoff);
-		printf("  cth_stroff   = %u\n", cth.cth_stroff);
-		printf("  cth_strlen   = %u\n", cth.cth_strlen);
+		    namestr(cf, cth->cth_parname));
+		printf("  cth_lbloff   = %u\n", cth->cth_lbloff);
+		printf("  cth_objtoff  = %u\n", cth->cth_objtoff);
+		printf("  cth_funcoff  = %u\n", cth->cth_funcoff);
+		printf("  cth_typeoff  = %u\n", cth->cth_typeoff);
+		printf("  cth_stroff   = %u\n", cth->cth_stroff);
+		printf("  cth_strlen   = %u\n", cth->cth_strlen);
 		printf("\n");
 	}
 
 	if (flags & DUMP_LABEL) {
-		uint32_t		 lbloff = cth.cth_lbloff;
+		uint32_t		 lbloff = cth->cth_lbloff;
 		struct ctf_lblent	*ctl;
 
-		while (lbloff < cth.cth_objtoff) {
+		while (lbloff < cth->cth_objtoff) {
 			ctl = (struct ctf_lblent *)(data + lbloff);
 
 			printf("  %5u %s\n", ctl->ctl_typeidx,
-			    ctf_off2name(&cth, data, dlen, ctl->ctl_label));
+			    namestr(cf, ctl->ctl_label));
 
 			lbloff += sizeof(*ctl);
 		}
@@ -364,17 +169,18 @@ ctf_dump(const char *p, size_t size, uint8_t flags)
 	}
 
 	if (flags & DUMP_OBJECT) {
-		uint32_t		 objtoff = cth.cth_objtoff;
+		uint32_t		 objtoff = cth->cth_objtoff;
 		size_t			 idx = 0, i = 0;
 		uint16_t		*dsp;
 		const char		*s;
 		int			 l;
 
-		while (objtoff < cth.cth_funcoff) {
+		while (objtoff < cth->cth_funcoff) {
 			dsp = (uint16_t *)(data + objtoff);
 
 			l = printf("  [%zu] %u", i++, *dsp);
-			if ((s = elf_idx2sym(&idx, STT_OBJECT)) != NULL)
+			if ((s = ctf_symbol_name(cf, &idx,
+			    STT_OBJECT)) != NULL)
 				printf("%*s %s (%zu)\n", (14 - l), "", s, idx);
 			else
 				printf("\n");
@@ -391,14 +197,14 @@ ctf_dump(const char *p, size_t size, uint8_t flags)
 		const char		*s;
 		int			 l;
 
-		fstart = (uint16_t *)(data + cth.cth_funcoff);
-		fend = (uint16_t *)(data + cth.cth_typeoff);
+		fstart = (uint16_t *)(data + cth->cth_funcoff);
+		fend = (uint16_t *)(data + cth->cth_typeoff);
 
 		fsp = fstart;
 		while (fsp < fend) {
 			kind = CTF_INFO_KIND(*fsp);
 			vlen = CTF_INFO_VLEN(*fsp);
-			s = elf_idx2sym(&idx, STT_FUNC);
+			s = ctf_symbol_name(cf, &idx, STT_FUNC);
 			fsp++;
 			i++;
 
@@ -417,11 +223,11 @@ ctf_dump(const char *p, size_t size, uint8_t flags)
 	}
 
 	if (flags & DUMP_TYPE) {
-		uint32_t		 idx = 1, offset = cth.cth_typeoff;
-		uint32_t		 stroff = cth.cth_stroff;
+		uint32_t		 idx = 1, offset = cth->cth_typeoff;
+		uint32_t		 stroff = cth->cth_stroff;
 
 		while (offset < stroff) {
-			ctf_dump_type(&cth, data, dlen, stroff, &offset, idx++);
+			ctf_dump_type(cf, &offset, idx++);
 		}
 		printf("\n");
 	}
@@ -430,11 +236,11 @@ ctf_dump(const char *p, size_t size, uint8_t flags)
 		uint32_t		 offset = 0;
 		const char		*str;
 
-		while (offset < cth.cth_strlen) {
-			str = ctf_off2name(&cth, data, dlen, offset);
+		while (offset < cth->cth_strlen) {
+			str = ctf_stroff2name(cf, offset);
 
 			printf("  [%u] ", offset);
-			if (strcmp(str, "(anon)"))
+			if (str != NULL)
 				offset += printf("%s\n", str);
 			else {
 				printf("\\0\n");
@@ -444,28 +250,34 @@ ctf_dump(const char *p, size_t size, uint8_t flags)
 		printf("\n");
 	}
 
-	if (cth.cth_flags & CTF_F_COMPRESS)
-		free(data);
-
 	return 0;
 }
 
 void
-ctf_dump_type(struct ctf_header *cth, const char *data, size_t dlen,
-    uint32_t stroff, uint32_t *offset, uint32_t idx)
+ctf_dump_type(ctf_file_t *cf, uint32_t *offset, uint32_t idx)
 {
-	const char		*p = data + *offset;
-	const struct ctf_type	*ctt = (struct ctf_type *)p;
+	const struct ctf_header	*cth;
+	const char		*data;
+	size_t			 dlen;
+	const char		*p;
+	const struct ctf_type	*ctt;
 	const struct ctf_array	*cta;
 	uint16_t		*argp, i, kind, vlen, root;
-	uint32_t		 eob, toff;
+	uint32_t		 eob, toff, stroff;
 	uint64_t		 size;
 	const char		*name, *kname;
+
+	cth = ctf_header(cf);
+	data = ctf_data(cf, &dlen);
+	stroff = cth->cth_stroff;
+
+	p = data + *offset;
+	ctt = (const struct ctf_type *)p;
 
 	kind = CTF_INFO_KIND(ctt->ctt_info);
 	vlen = CTF_INFO_VLEN(ctt->ctt_info);
 	root = CTF_INFO_ISROOT(ctt->ctt_info);
-	name = ctf_off2name(cth, data, dlen, ctt->ctt_name);
+	name = namestr(cf, ctt->ctt_name);
 
 	if (root)
 		printf("  <%u> ", idx);
@@ -538,8 +350,7 @@ ctf_dump_type(struct ctf_header *cth, const char *data, size_t dlen,
 				toff += sizeof(struct ctf_member);
 
 				printf("\t%s type=%u off=%u\n",
-				    ctf_off2name(cth, data, dlen,
-					ctm->ctm_name),
+				    namestr(cf, ctm->ctm_name),
 				    ctm->ctm_type, ctm->ctm_offset);
 			}
 		} else {
@@ -556,8 +367,7 @@ ctf_dump_type(struct ctf_header *cth, const char *data, size_t dlen,
 				toff += sizeof(struct ctf_lmember);
 
 				printf("\t%s type=%u off=%llu\n",
-				    ctf_off2name(cth, data, dlen,
-					ctlm->ctlm_name),
+				    namestr(cf, ctlm->ctlm_name),
 				    ctlm->ctlm_type, CTF_LMEM_OFFSET(ctlm));
 			}
 		}
@@ -578,7 +388,7 @@ ctf_dump_type(struct ctf_header *cth, const char *data, size_t dlen,
 			toff += sizeof(struct ctf_enum);
 
 			printf("\t%s = %d\n",
-			    ctf_off2name(cth, data, dlen, cte->cte_name),
+			    namestr(cf, cte->cte_name),
 			    cte->cte_value);
 		}
 		break;
@@ -596,122 +406,6 @@ ctf_dump_type(struct ctf_header *cth, const char *data, size_t dlen,
 	printf("\n");
 
 	*offset += toff;
-}
-
-const char *
-ctf_kind2name(uint16_t kind)
-{
-	static const char *kind_name[] = { NULL, "INTEGER", "FLOAT", "POINTER",
-	   "ARRAY", "FUNCTION", "STRUCT", "UNION", "ENUM", "FORWARD",
-	   "TYPEDEF", "VOLATILE", "CONST", "RESTRICT" };
-
-	if (kind >= nitems(kind_name))
-		return NULL;
-
-	return kind_name[kind];
-}
-
-const char *
-ctf_enc2name(uint16_t enc)
-{
-	static const char *enc_name[] = { "SIGNED", "CHAR", "SIGNED CHAR",
-	    "BOOL", "SIGNED BOOL" };
-	static char invalid[7];
-
-	if (enc == CTF_INT_VARARGS)
-		return "VARARGS";
-
-	if (enc > 0 && enc <= nitems(enc_name))
-		return enc_name[enc - 1];
-
-	snprintf(invalid, sizeof(invalid), "0x%x", enc);
-	return invalid;
-}
-
-const char *
-ctf_fpenc2name(uint16_t enc)
-{
-	static const char *enc_name[] = { "SINGLE", "DOUBLE", NULL, NULL,
-	    NULL, "LDOUBLE" };
-	static char invalid[7];
-
-	if (enc > 0 && enc <= nitems(enc_name) && enc_name[enc - 1] != NULL)
-		return enc_name[enc - 1];
-
-	snprintf(invalid, sizeof(invalid), "0x%x", enc);
-	return invalid;
-}
-
-const char *
-ctf_off2name(struct ctf_header *cth, const char *data, size_t dlen,
-    uint32_t offset)
-{
-	const char		*name;
-
-	if (CTF_NAME_STID(offset) != CTF_STRTAB_0)
-		return "external";
-
-	if (CTF_NAME_OFFSET(offset) >= cth->cth_strlen)
-		return "exceeds strlab";
-
-	if (cth->cth_stroff + CTF_NAME_OFFSET(offset) >= dlen)
-		return "invalid";
-
-	name = data + cth->cth_stroff + CTF_NAME_OFFSET(offset);
-	if (*name == '\0')
-		return "(anon)";
-
-	return name;
-}
-
-char *
-decompress(const char *buf, size_t size, size_t len)
-{
-#ifdef ZLIB
-	z_stream		 stream;
-	char			*data;
-	int			 error;
-
-	data = malloc(len);
-	if (data == NULL) {
-		warn(NULL);
-		return NULL;
-	}
-
-	memset(&stream, 0, sizeof(stream));
-	stream.next_in = (void *)buf;
-	stream.avail_in = size;
-	stream.next_out = (uint8_t *)data;
-	stream.avail_out = len;
-
-	if ((error = inflateInit(&stream)) != Z_OK) {
-		warnx("zlib inflateInit failed: %s", zError(error));
-		goto exit;
-	}
-
-	if ((error = inflate(&stream, Z_FINISH)) != Z_STREAM_END) {
-		warnx("zlib inflate failed: %s", zError(error));
-		inflateEnd(&stream);
-		goto exit;
-	}
-
-	if ((error = inflateEnd(&stream)) != Z_OK) {
-		warnx("zlib inflateEnd failed: %s", zError(error));
-		goto exit;
-	}
-
-	if (stream.total_out != len) {
-		warnx("decompression failed: %lu != %zu",
-		    stream.total_out, len);
-		goto exit;
-	}
-
-	return data;
-
-exit:
-	free(data);
-#endif /* ZLIB */
-	return NULL;
 }
 
 __dead void
