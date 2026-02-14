@@ -25,6 +25,7 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fnmatch.h>
 #include <limits.h>
 #include <locale.h>
 #include <paths.h>
@@ -40,6 +41,9 @@
 #include <dev/dt/dtvar.h>
 
 #include <gelf.h>
+
+#include <sys/ctf.h>
+#include <ctf.h>
 
 #include "btrace.h"
 #include "bt_parser.h"
@@ -64,8 +68,8 @@ char			*read_btfile(const char *, size_t *);
 void			 dtpi_cache(int);
 void			 dtpi_print_list(int);
 const char		*dtpi_func(struct dtioc_probe_info *);
-struct dtioc_probe_info	*dtpi_get_by_value(const char *, const char *,
-			     const char *);
+size_t			 dtpi_get_by_pattern(const char *, const char *,
+			     const char *, struct dtioc_probe_info **, size_t);
 
 /*
  * Main loop and rule evaluation.
@@ -123,10 +127,14 @@ struct dt_evt		 bt_devt;	/* fake event for BEGIN/END */
 uint64_t		 bt_filtered;	/* # of events filtered out */
 
 struct syms		*kelf;
+ctf_file_t		*ctf_handle;	/* CTF data from /bsd */
+
+#define __PATH_BSD "/bsd"
 
 char			**vargs;
 int			 nargs = 0;
 int			 verbose = 0;
+int			 quiet = 0;
 int			 dtfd;
 volatile sig_atomic_t	 quit_pending;
 
@@ -147,7 +155,7 @@ main(int argc, char *argv[])
 
 	setlocale(LC_ALL, "");
 
-	while ((ch = getopt(argc, argv, "e:lnp:v")) != -1) {
+	while ((ch = getopt(argc, argv, "e:lnp:qv")) != -1) {
 		switch (ch) {
 		case 'e':
 			btscript = optarg;
@@ -158,6 +166,9 @@ main(int argc, char *argv[])
 			break;
 		case 'n':
 			noaction = 1;
+			break;
+		case 'q':
+			quiet = 1;
 			break;
 		case 'v':
 			verbose++;
@@ -178,6 +189,8 @@ main(int argc, char *argv[])
 		err(1, "unveil %s", __PATH_DEVDT);
 	if (unveil(_PATH_KSYMS, "r") == -1)
 		err(1, "unveil %s", _PATH_KSYMS);
+	if (unveil(__PATH_BSD, "r") == -1)
+		err(1, "unveil %s", __PATH_BSD);
 	if (filename != NULL) {
 		if (unveil(filename, "r") == -1)
 			err(1, "unveil %s", filename);
@@ -218,8 +231,12 @@ main(int argc, char *argv[])
 		dtpi_print_list(fd);
 	}
 
-	if (!TAILQ_EMPTY(&g_rules))
+	if (!TAILQ_EMPTY(&g_rules)) {
+		ctf_handle = ctf_open(__PATH_BSD);
 		rules_do(fd);
+		ctf_close(ctf_handle);
+		ctf_handle = NULL;
+	}
 
 	if (fd != -1)
 		close(fd);
@@ -230,7 +247,7 @@ main(int argc, char *argv[])
 __dead void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-lnv] "
+	fprintf(stderr, "usage: %s [-lnqv] "
 	    "programfile | -e program [argument ...]\n", getprogname());
 	exit(1);
 }
@@ -315,14 +332,32 @@ dtai_cache(int fd, struct dtioc_probe_info *dtpi)
 void
 dtpi_print_list(int fd)
 {
-	struct dtioc_probe_info *dtpi;
+	struct dtioc_probe_info *dtpi, *prev = NULL;
 	struct dtioc_arg_info *dtai;
 	size_t i, j;
 
 	dtpi = dt_dtpis;
 	for (i = 0; i < dt_ndtpi; i++, dtpi++) {
-		printf("%s:%s:%s", dtpi->dtpi_prov, dtpi_func(dtpi),
-		    dtpi->dtpi_name);
+		/*
+		 * Skip duplicate entries.  kretprobe creates one probe
+		 * per ret instruction; only show the function once.
+		 */
+		if (prev != NULL &&
+		    strncmp(prev->dtpi_prov, dtpi->dtpi_prov,
+		        DTNAMESIZE) == 0 &&
+		    strncmp(prev->dtpi_func, dtpi->dtpi_func,
+		        DTNAMESIZE) == 0 &&
+		    strncmp(prev->dtpi_name, dtpi->dtpi_name,
+		        DTNAMESIZE) == 0) {
+			continue;
+		}
+		prev = dtpi;
+
+		if (dtpi->dtpi_name[0] == '\0')
+			printf("%s:%s", dtpi->dtpi_prov, dtpi_func(dtpi));
+		else
+			printf("%s:%s:%s", dtpi->dtpi_prov, dtpi_func(dtpi),
+			    dtpi->dtpi_name);
 		if (strncmp(dtpi->dtpi_prov, "tracepoint", DTNAMESIZE) == 0) {
 			dtai_cache(fd, dtpi);
 			dtai = dt_args[dtpi->dtpi_pbn - 1];
@@ -351,7 +386,8 @@ dtpi_func(struct dtioc_probe_info *dtpi)
 	/* Translate syscall names */
 	strlcpy(func, dtpi->dtpi_func, sizeof(func));
 	sysnb = func;
-	if (strsep(&sysnb, "%") == NULL)
+	strsep(&sysnb, "%");
+	if (sysnb == NULL)
 		return dtpi->dtpi_func;
 
 	idx = strtonum(sysnb, 1, SYS_MAXSYSCALL, &errstr);
@@ -361,31 +397,37 @@ dtpi_func(struct dtioc_probe_info *dtpi)
 	return syscallnames[idx];
 }
 
-struct dtioc_probe_info *
-dtpi_get_by_value(const char *prov, const char *func, const char *name)
+size_t
+dtpi_get_by_pattern(const char *prov, const char *func, const char *name,
+    struct dtioc_probe_info **resultp, size_t resultsz)
 {
 	struct dtioc_probe_info *dtpi;
-	size_t i;
+	size_t i, nmatch = 0;
 
 	dtpi = dt_dtpis;
 	for (i = 0; i < dt_ndtpi; i++, dtpi++) {
-		if (prov != NULL) {
-			if (strncmp(prov, dtpi->dtpi_prov, DTNAMESIZE))
-				continue;
-		}
+		if (prov != NULL &&
+		    fnmatch(prov, dtpi->dtpi_prov, 0) != 0)
+			continue;
 		if (func != NULL && name != NULL) {
-			if (strncmp(func, dtpi_func(dtpi), DTNAMESIZE))
+			if (fnmatch(func, dtpi_func(dtpi), 0) != 0)
 				continue;
-			if (strncmp(name, dtpi->dtpi_name, DTNAMESIZE))
+			if (name[0] != '\0' &&
+			    fnmatch(name, dtpi->dtpi_name, 0) != 0)
 				continue;
 		}
 
-		debug("matched probe %s:%s:%s\n", dtpi->dtpi_prov,
-		    dtpi_func(dtpi), dtpi->dtpi_name);
-		return dtpi;
+		if (nmatch >= resultsz) {
+			resultsz = resultsz ? resultsz * 2 : 64;
+			*resultp = reallocarray(*resultp, resultsz,
+			    sizeof(**resultp));
+			if (*resultp == NULL)
+				err(1, "reallocarray");
+		}
+		(*resultp)[nmatch++] = *dtpi;
 	}
 
-	return NULL;
+	return nmatch;
 }
 
 static uint64_t
@@ -442,9 +484,12 @@ probe_name(struct bt_probe *bp)
 	if (bp->bp_nsecs) {
 		snprintf(buf, sizeof(buf), "%s:%s:%llu", bp->bp_prov,
 		    bp->bp_unit, bp_nsecs_to_unit(bp));
+	} else if (bp->bp_name == NULL || bp->bp_name[0] == '\0') {
+		snprintf(buf, sizeof(buf), "%s:%s", bp->bp_prov,
+		    bp->bp_func);
 	} else {
 		snprintf(buf, sizeof(buf), "%s:%s:%s", bp->bp_prov,
-		    bp->bp_unit, bp->bp_name);
+		    bp->bp_func, bp->bp_name);
 	}
 
 	return buf;
@@ -467,8 +512,12 @@ rules_do(int fd)
 
 	halt = rules_setup(fd);
 
+	if (!quiet && g_nprobes > 0)
+		fprintf(stderr, "Attaching %d probe%s...\n",
+		    g_nprobes, g_nprobes > 1 ? "s" : "");
+
 	while (!quit_pending && !halt && g_nprobes > 0) {
-		static struct dt_evt devtbuf[64];
+		static struct dt_evt devtbuf[1024];
 		ssize_t rlen;
 		size_t i;
 
@@ -588,24 +637,67 @@ rules_setup(int fd)
 			}
 
 			dtpi_cache(fd);
-			dtpi = dtpi_get_by_value(bp->bp_prov, bp->bp_func,
-			    bp->bp_name);
-			if (dtpi == NULL) {
-				errx(1, "probe '%s:%s:%s' not found",
-				    bp->bp_prov, bp->bp_func, bp->bp_name);
+
+			{
+				struct dtioc_probe_info *matches = NULL;
+				struct bt_probe *bpnew, *bpprev;
+				size_t j, nmatch;
+
+				nmatch = dtpi_get_by_pattern(bp->bp_prov,
+				    bp->bp_func, bp->bp_name, &matches, 0);
+				if (nmatch == 0)
+					errx(1, "no probes matched '%s'",
+					    probe_name(bp));
+
+				debug("probe '%s' matched %zu probes\n",
+				    probe_name(bp), nmatch);
+
+				/* Reuse the current bp for the first match */
+				dtpi = &matches[0];
+				dtrq = calloc(1, sizeof(*dtrq));
+				if (dtrq == NULL)
+					err(1, "dtrq: calloc");
+				bp->bp_pbn = dtpi->dtpi_pbn;
+				dtrq->dtrq_pbn = dtpi->dtpi_pbn;
+				dtrq->dtrq_nsecs = bp->bp_nsecs;
+				dtrq->dtrq_evtflags = evtflags;
+				if (dtrq->dtrq_evtflags & DTEVT_KSTACK)
+					dokstack = 1;
+				bp->bp_cookie = dtrq;
+
+				/* Create additional probes for remaining matches */
+				bpprev = bp;
+				for (j = 1; j < nmatch; j++) {
+					dtpi = &matches[j];
+					bpnew = calloc(1, sizeof(*bpnew));
+					if (bpnew == NULL)
+						err(1, "bt_probe: calloc");
+					bpnew->bp_prov = bp->bp_prov;
+					bpnew->bp_func = bp->bp_func;
+					bpnew->bp_name = bp->bp_name;
+					bpnew->bp_type = bp->bp_type;
+					bpnew->bp_nsecs = bp->bp_nsecs;
+					bpnew->bp_pbn = dtpi->dtpi_pbn;
+
+					dtrq = calloc(1, sizeof(*dtrq));
+					if (dtrq == NULL)
+						err(1, "dtrq: calloc");
+					dtrq->dtrq_pbn = dtpi->dtpi_pbn;
+					dtrq->dtrq_nsecs = bp->bp_nsecs;
+					dtrq->dtrq_evtflags = evtflags;
+					if (dtrq->dtrq_evtflags & DTEVT_KSTACK)
+						dokstack = 1;
+					bpnew->bp_cookie = dtrq;
+
+					SLIST_INSERT_AFTER(bpprev, bpnew,
+					    bp_next);
+					bpprev = bpnew;
+					g_nprobes++;
+				}
+				/* Skip past newly inserted probes */
+				bp = bpprev;
+				free(matches);
 			}
-
-			dtrq = calloc(1, sizeof(*dtrq));
-			if (dtrq == NULL)
-				err(1, "dtrq: 1alloc");
-
-			bp->bp_pbn = dtpi->dtpi_pbn;
-			dtrq->dtrq_pbn = dtpi->dtpi_pbn;
-			dtrq->dtrq_nsecs = bp->bp_nsecs;
-			dtrq->dtrq_evtflags = evtflags;
-			if (dtrq->dtrq_evtflags & DTEVT_KSTACK)
-				dokstack = 1;
-			bp->bp_cookie = dtrq;
 		}
 	}
 
@@ -845,33 +937,147 @@ builtin_stack(struct dt_evt *dtev, int kernel)
 	return buf;
 }
 
+/*
+ * Format a register_t value based on its CTF type.  Resolves through
+ * typedefs, qualifiers, and displays pointers, enums, and integers
+ * with appropriate formatting.
+ */
+static const char *
+ctf_format_arg(ctf_file_t *cf, uint16_t typeid, long val)
+{
+	static char buf[128];
+	const char *name, *modif;
+	uint16_t kind, ref;
+	uint32_t enc;
+	int depth = 0;
+
+	/* Resolve typedefs and qualifiers */
+	while (depth++ < 16) {
+		kind = ctf_type_kind(cf, typeid);
+
+		switch (kind) {
+		case CTF_K_TYPEDEF:
+		case CTF_K_VOLATILE:
+		case CTF_K_CONST:
+		case CTF_K_RESTRICT:
+			typeid = ctf_type_reference(cf, typeid);
+			if (typeid == 0)
+				goto fallback;
+			continue;
+		default:
+			break;
+		}
+		break;
+	}
+
+	switch (kind) {
+	case CTF_K_INTEGER:
+		enc = ctf_type_encoding(cf, typeid);
+		if (CTF_INT_ENCODING(enc) & CTF_INT_SIGNED) {
+			if (CTF_INT_ENCODING(enc) & CTF_INT_CHAR) {
+				snprintf(buf, sizeof(buf), "'%c'", (char)val);
+			} else {
+				snprintf(buf, sizeof(buf), "%ld", val);
+			}
+		} else {
+			if ((unsigned long)val > 4096)
+				snprintf(buf, sizeof(buf), "0x%lx", val);
+			else
+				snprintf(buf, sizeof(buf), "%lu",
+				    (unsigned long)val);
+		}
+		return buf;
+
+	case CTF_K_POINTER:
+		ref = ctf_type_reference(cf, typeid);
+		if (ref != 0) {
+			uint16_t refkind;
+
+			modif = "";
+			refkind = ctf_type_kind(cf, ref);
+			switch (refkind) {
+			case CTF_K_STRUCT:
+				modif = "struct ";
+				break;
+			case CTF_K_UNION:
+				modif = "union ";
+				break;
+			case CTF_K_VOLATILE:
+				modif = "volatile ";
+				ref = ctf_type_reference(cf, ref);
+				break;
+			case CTF_K_CONST:
+				modif = "const ";
+				ref = ctf_type_reference(cf, ref);
+				break;
+			default:
+				break;
+			}
+			name = ctf_type_name(cf, ref);
+			if (name != NULL) {
+				snprintf(buf, sizeof(buf), "(%s%s *)0x%lx",
+				    modif, name, val);
+				return buf;
+			}
+		}
+		snprintf(buf, sizeof(buf), "0x%lx", val);
+		return buf;
+
+	case CTF_K_ENUM:
+		name = ctf_enum_name(cf, typeid, (int)val);
+		if (name != NULL) {
+			snprintf(buf, sizeof(buf), "%s", name);
+			return buf;
+		}
+		snprintf(buf, sizeof(buf), "%d", (int)val);
+		return buf;
+
+	default:
+		break;
+	}
+
+fallback:
+	snprintf(buf, sizeof(buf), "0x%lx", val);
+	return buf;
+}
+
 const char *
 builtin_arg(struct dt_evt *dtev, enum bt_argtype dat)
 {
 	static char buf[sizeof("18446744073709551615")]; /* UINT64_MAX */
 	struct dtioc_probe_info *dtpi;
 	struct dtioc_arg_info *dtai;
-	const char *argtype, *fmt;
+	const char *argtype;
 	unsigned int argn;
-	long value;
 
 	argn = dat - B_AT_BI_ARG0;
 	dtpi = &dt_dtpis[dtev->dtev_pbn - 1];
 	if (dtpi == NULL || argn >= dtpi->dtpi_nargs)
 		return "0";
 
+	/* Try CTF-based type-aware formatting */
+	if (ctf_handle != NULL) {
+		uint16_t argtypes[DTMAXFUNCARGS];
+		uint16_t ret_type;
+		int nargs;
+
+		nargs = ctf_func_info(ctf_handle, dtpi->dtpi_func,
+		    &ret_type, argtypes, DTMAXFUNCARGS);
+		if (nargs > 0 && argn < (unsigned int)nargs)
+			return ctf_format_arg(ctf_handle, argtypes[argn],
+			    dtev->dtev_args[argn]);
+	}
+
+	/* Fallback: use kernel-provided type name string */
 	dtai = dt_args[dtev->dtev_pbn - 1];
 	argtype = dtai[argn].dtai_argtype;
 
-	if (strncmp(argtype, "int", DTNAMESIZE) == 0) {
-		fmt = "%d";
-		value = (int)dtev->dtev_args[argn];
-	} else {
-		fmt = "%lu";
-		value = dtev->dtev_args[argn];
-	}
-
-	snprintf(buf, sizeof(buf), fmt, dtev->dtev_args[argn]);
+	if (strncmp(argtype, "int", DTNAMESIZE) == 0)
+		snprintf(buf, sizeof(buf), "%d",
+		    (int)dtev->dtev_args[argn]);
+	else
+		snprintf(buf, sizeof(buf), "%lu",
+		    (unsigned long)dtev->dtev_args[argn]);
 
 	return buf;
 }
@@ -1829,6 +2035,21 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		str = builtin_arg(dtev, ba->ba_type);
 		break;
 	case B_AT_BI_RETVAL:
+		if (ctf_handle != NULL && dtev->dtev_pbn != EVENT_BEGIN &&
+		    dtev->dtev_pbn != EVENT_END) {
+			struct dtioc_probe_info *rpi;
+			uint16_t ret_type;
+			int nargs;
+
+			rpi = &dt_dtpis[dtev->dtev_pbn - 1];
+			nargs = ctf_func_info(ctf_handle, rpi->dtpi_func,
+			    &ret_type, NULL, 0);
+			if (nargs >= 0 && ret_type != 0) {
+				str = ctf_format_arg(ctf_handle, ret_type,
+				    dtev->dtev_retval[0]);
+				break;
+			}
+		}
 		snprintf(buf, sizeof(buf), "%ld", (long)dtev->dtev_retval[0]);
 		str = buf;
 		break;
@@ -1841,10 +2062,15 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 			break;
 		}
 		dtpi = &dt_dtpis[dtev->dtev_pbn - 1];
-		if (dtpi != NULL)
-			snprintf(buf, sizeof(buf), "%s:%s:%s",
-			    dtpi->dtpi_prov, dtpi_func(dtpi), dtpi->dtpi_name);
-		else
+		if (dtpi != NULL) {
+			if (dtpi->dtpi_name[0] == '\0')
+				snprintf(buf, sizeof(buf), "%s:%s",
+				    dtpi->dtpi_prov, dtpi_func(dtpi));
+			else
+				snprintf(buf, sizeof(buf), "%s:%s:%s",
+				    dtpi->dtpi_prov, dtpi_func(dtpi),
+				    dtpi->dtpi_name);
+		} else
 			snprintf(buf, sizeof(buf), "%u", dtev->dtev_pbn);
 		str = buf;
 		break;
