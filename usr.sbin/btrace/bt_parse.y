@@ -156,6 +156,7 @@ probe	: { pflag = 1; } pname		{ $$ = $2; pflag = 0; }
 
 pname	: STRING ':' STRING ':' STRING	{ $$ = bp_new($1, $3, $5, 0); }
 	| STRING ':' STRING ':' NUMBER	{ $$ = bp_new($1, $3, NULL, $5); }
+	| STRING ':' STRING		{ $$ = bp_new($1, $3, "", 0); }
 	;
 
 mentry	: GVAR '[' vargs ']'		{ $$ = bm_find($1, $3); }
@@ -830,6 +831,12 @@ allowed_in_string(int x)
 	return (isalnum(x) || x == '_');
 }
 
+static inline int
+allowed_in_probe_string(int x)
+{
+	return (isalnum(x) || x == '_' || x == '*' || x == '?');
+}
+
 static int
 skip(void)
 {
@@ -1093,7 +1100,7 @@ again:
 	}
 
 	/* parsing next word */
-	if (allowed_in_string(c)) {
+	if (allowed_in_string(c) || (pflag && (c == '*' || c == '?'))) {
 		struct keyword *kwp;
 		do {
 			*p++ = c;
@@ -1101,24 +1108,22 @@ again:
 				yyerror("line too long");
 				return ERROR;
 			}
-		} while ((c = lgetc()) != EOF && (allowed_in_string(c)));
+		} while ((c = lgetc()) != EOF &&
+		    (pflag ? allowed_in_probe_string(c)
+			   : allowed_in_string(c)));
 		lungetc();
 		*p = '\0';
 		kwp = lookup(buf);
-		if (kwp == NULL) {
-			if ((yylval.v.string = strdup(buf)) == NULL)
-				err(1, "%s", __func__);
+		if (kwp == NULL || pflag) {
+			if (kwp == NULL) {
+				if ((yylval.v.string = strdup(buf)) == NULL)
+					err(1, "%s", __func__);
+			} else {
+				yylval.v.string = kwp->word;
+			}
 			return STRING;
 		}
-		if (pflag) {
-			/*
-			 * Probe lexer backdoor, interpret the token as a string
-			 * rather than a keyword. Otherwise, reserved keywords
-			 * would conflict with syscall names.
-			 */
-			yylval.v.string = kwp->word;
-			return STRING;
-		} else if (beflag) {
+		if (beflag) {
 			/* Interpret tokens in a BEGIN/END context. */
 			if (kwp->type >= B_AT_BI_ARG0 &&
 			    kwp->type <= B_AT_BI_ARG9)

@@ -22,7 +22,7 @@
 .Nd bug tracer
 .Sh SYNOPSIS
 .Nm btrace
-.Op Fl lnv
+.Op Fl lnqv
 .Ar programfile | Fl e Ar program
 .Op Ar argument ...
 .Sh DESCRIPTION
@@ -55,6 +55,9 @@ List all available probes.
 .It Fl n
 No action.
 Parse the program and then exit.
+.It Fl q
+Quiet mode.
+Suppress informational messages.
 .It Fl v
 Verbose mode.
 Causes
@@ -72,6 +75,34 @@ collection of useful
 .Nm
 programs
 .El
+.Sh EXAMPLES
+Trace all kernel memory allocation functions, showing arguments:
+.Pp
+.Dl # btrace -e 'kprobe:*alloc* { printf("%s(%s)\en", probe, arg0); }'
+.Pp
+Trace return values from a kernel function:
+.Pp
+.Dl # btrace -e 'kretprobe:malloc { printf("malloc returned %s\en", retval); }'
+.Pp
+Count function calls matching a pattern:
+.Pp
+.Dl # btrace -e 'kprobe:vm_* { @[probe] = count(); }'
+.Pp
+Profile kernel stacks at 99 Hz:
+.Pp
+.Dl # btrace -e 'profile:hz:99 { @[kstack] = count(); }'
+.Pp
+Print a map every 5 seconds:
+.Pp
+.Dl # btrace -e 'interval:s:5 { print(@); }'
+.Pp
+Count syscalls by process name:
+.Pp
+.Dl # btrace -e 'syscall:*:entry { @[comm] = count(); }'
+.Pp
+Histogram of syscall latency:
+.Pp
+.Dl # btrace -e 'syscall:*:entry { @start[tid] = nsecs; } syscall:*:return /@start[tid]/ { @ = hist(nsecs - @start[tid]); delete(@start[tid]); }'
 .Sh EXIT STATUS
 .Ex -std 
 .Sh SEE ALSO

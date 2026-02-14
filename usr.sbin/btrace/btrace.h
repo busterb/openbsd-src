@@ -36,6 +36,10 @@ long			 ba2long(struct bt_arg *, struct dt_evt *);
 const char		*ba2str(struct bt_arg *, struct dt_evt *);
 long			 bacmp(struct bt_arg *, struct bt_arg *);
 
+/* ctf.h */
+struct ctf_file;
+typedef struct ctf_file ctf_file_t;
+
 /* ksyms.c */
 struct syms;
 struct syms		*kelf_open_kernel(const char *);

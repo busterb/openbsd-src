@@ -63,6 +63,69 @@ may be used to manipulate states before the first event is recorded and after
 the last.
 They cannot be combined with any
 .Ar filter .
+.Pp
+The following providers are available:
+.Bl -tag -width "tracepoint"
+.It Cm syscall
+Trace system call entry and return points.
+Probe format:
+.Ic syscall : Ns Ar name Ns Ic :entry
+or
+.Ic syscall : Ns Ar name Ns Ic :return .
+.It Cm kprobe
+Trace kernel function entry points.
+Probe format:
+.Ic kprobe : Ns Ar func .
+.It Cm kretprobe
+Trace kernel function return points, capturing the return value.
+Probe format:
+.Ic kretprobe : Ns Ar func .
+The
+.Va retval
+variable contains the function's return value.
+.It Cm profile
+Periodic sampling timer that fires on all CPUs.
+Probe format:
+.Ic profile : Ns Ar unit Ns Ic \&: Ns Ar value .
+.It Cm interval
+Periodic timer that fires on a single CPU.
+Probe format:
+.Ic interval : Ns Ar unit Ns Ic \&: Ns Ar value .
+.It Cm tracepoint
+Static kernel tracepoints.
+.El
+.Pp
+The
+.Cm profile
+and
+.Cm interval
+probes accept the following timer units:
+.Pp
+.Bl -tag -width "hz" -compact -offset indent
+.It Cm hz
+frequency in Hertz
+.It Cm us
+microseconds
+.It Cm ms
+milliseconds
+.It Cm s
+seconds
+.El
+.Pp
+Probe names may contain the wildcard characters
+.Ql *
+and
+.Ql \&? ,
+which are matched using
+.Xr fnmatch 3 .
+A single probe clause with wildcards expands to all matching probes.
+For example:
+.Pp
+.Dl kprobe:*alloc*
+.Pp
+matches all kernel functions containing
+.Dq alloc
+at entry.
 .Sh FILTER
 Define under which condition an event should be recorded when its related
 .Ar probe
@@ -108,12 +171,28 @@ Process ID of the current thread.
 .It Va probe
 Full name of the probe.
 .It Va retval
-Return value of the traced syscall.
+Return value of the traced syscall or
+.Cm kretprobe
+return probe.
 .It Va tid
 Thread ID of the current thread.
 .It Va ustack
 Userland stack of the current thread.
 .El
+.Pp
+When CTF (Compact C Type Format) data is available in
+.Pa /bsd ,
+the
+.Va arg0
+through
+.Va arg9
+and
+.Va retval
+variables are automatically formatted according to their C types:
+signed integers as decimal, unsigned integers as hexadecimal when large,
+pointers as
+.Dq Li (struct foo *)0xaddr ,
+enums by name, and characters as quoted literals.
 .Pp
 Functions:
 .Bl -tag -width "lhist(value, min, max, step)"
@@ -187,6 +266,26 @@ Store the minimum recorded value for
 .It "@map[key]" = Fn sum "value"
 Store the sum of all recorded values for
 .Va key .
+.El
+.Sh EXAMPLES
+Working examples are installed in
+.Pa /usr/share/btrace/ :
+.Pp
+.Bl -tag -width "syscalllat.bt" -compact
+.It Pa kalloc.bt
+Trace kernel allocation functions with type-aware arguments.
+.It Pa kfunctime.bt
+Measure kernel function call duration.
+.It Pa kprofile.bt
+Kernel profiling via stack sampling.
+.It Pa runqlat.bt
+Measure run queue (scheduler) latency.
+.It Pa syscalllat.bt
+Histogram of syscall latency.
+.It Pa syscount.bt
+Count syscalls by process name.
+.It Pa uvmcount.bt
+Count calls to VM subsystem functions.
 .El
 .Sh SEE ALSO
 .Xr awk 1 ,
