@@ -88,7 +88,7 @@
 #define DT_FA_PROFILE	0
 #endif
 
-#define DT_EVTRING_SIZE	16	/* # of slots in per PCB event ring */
+#define DT_EVTRING_SIZE	4096	/* # of slots in per PCB event ring */
 
 #define DPRINTF(x...) /* nothing */
 
@@ -151,6 +151,7 @@ struct rwlock			dt_lock = RWLOCK_INITIALIZER("dtlk");
 volatile uint32_t		dt_tracing = 0;	/* [D] # of processes tracing */
 
 int allowdt;					/* [a] */
+int dt_prov_kprobe_loaded;			/* [D] */
 
 void	dtattach(struct device *, struct device *, void *);
 int	dtopen(dev_t, int, int, struct proc *);
@@ -186,9 +187,6 @@ dtattach(struct device *parent, struct device *self, void *aux)
 	dt_nprobes += dt_prov_profile_init();
 	dt_nprobes += dt_prov_syscall_init();
 	dt_nprobes += dt_prov_static_init();
-#ifdef DDBPROF
-	dt_nprobes += dt_prov_kprobe_init();
-#endif
 }
 
 int
@@ -199,6 +197,14 @@ dtopen(dev_t dev, int flags, int mode, struct proc *p)
 
 	if (atomic_load_int(&allowdt) == 0)
 		return EPERM;
+
+	/* Initialize on first use, since this takes a while. */
+	rw_enter_write(&dt_lock);
+	if (!dt_prov_kprobe_loaded) {
+		dt_prov_kprobe_loaded = 1;
+		dt_nprobes += dt_prov_kprobe_init();
+	}
+	rw_exit_write(&dt_lock);
 
 	sc = dtalloc();
 	if (sc == NULL)
