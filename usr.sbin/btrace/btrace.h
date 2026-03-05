@@ -64,7 +64,7 @@ void			 hist_increment(struct hist *, const char *);
 void			 hist_print(struct hist *, const char *);
 
 #define KLEN	1024	/* # of characters in map key, contain a stack trace */
-#define STRLEN	128	/* maximum # of bytes to output via str() function */
+#define STRLEN	1024	/* maximum # of bytes to output via str() function */
 
 /* printf.c */
 int			 stmt_printf(struct bt_stmt *, struct dt_evt *);

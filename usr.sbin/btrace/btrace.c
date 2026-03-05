@@ -89,6 +89,10 @@ void			 rule_printmaps(struct bt_rule *);
 uint64_t		 builtin_nsecs(struct dt_evt *);
 const char		*builtin_arg(struct dt_evt *, enum bt_argtype);
 struct bt_arg		*fn_str(struct bt_arg *, struct dt_evt *, char *);
+uint16_t		 ba2strargs(struct bt_arg *);
+uint16_t		 rules_strargs_scan(struct bt_stmt *);
+uint16_t		 ba_strlen(struct bt_arg *);
+uint16_t		 rules_strlen_scan(struct bt_stmt *);
 int			 stmt_eval(struct bt_stmt *, struct dt_evt *);
 void			 stmt_bucketize(struct bt_stmt *, struct dt_evt *);
 void			 stmt_clear(struct bt_stmt *);
@@ -592,6 +596,179 @@ rules_action_scan(struct bt_stmt *bs)
 	return evtflags;
 }
 
+/*
+ * Scan a bt_arg tree for str(argN) calls and return a bitmask of which
+ * arg indices (0..DTMAXFUNCARGS-1) need to be captured as strings.
+ */
+uint16_t
+ba2strargs(struct bt_arg *ba)
+{
+	uint16_t mask = 0;
+	struct bt_arg *inner;
+
+	do {
+		switch (ba->ba_type) {
+		case B_AT_FN_STR:
+			inner = (struct bt_arg *)ba->ba_value;
+			if (inner != NULL &&
+			    inner->ba_type >= B_AT_BI_ARG0 &&
+			    inner->ba_type <= B_AT_BI_ARG9)
+				mask |= (1u << (inner->ba_type - B_AT_BI_ARG0));
+			break;
+		case B_AT_MAP:
+			if (ba->ba_key != NULL)
+				mask |= ba2strargs(ba->ba_key);
+			break;
+		case B_AT_TUPLE:
+			if (ba->ba_value != NULL)
+				mask |= ba2strargs(ba->ba_value);
+			break;
+		case B_AT_OP_PLUS ... B_AT_OP_LOR:
+			if (ba->ba_value != NULL)
+				mask |= ba2strargs(ba->ba_value);
+			break;
+		default:
+			break;
+		}
+	} while ((ba = SLIST_NEXT(ba, ba_next)) != NULL);
+
+	return mask;
+}
+
+uint16_t
+rules_strargs_scan(struct bt_stmt *bs)
+{
+	struct bt_arg *ba;
+	struct bt_cond *bc;
+	uint16_t mask = 0;
+
+	while (bs != NULL) {
+		SLIST_FOREACH(ba, &bs->bs_args, ba_next)
+			mask |= ba2strargs(ba);
+
+		switch (bs->bs_act) {
+		case B_AC_BUCKETIZE:
+		case B_AC_INSERT:
+			ba = (struct bt_arg *)bs->bs_var;
+			mask |= ba2strargs(ba);
+			break;
+		case B_AC_TEST:
+			bc = (struct bt_cond *)bs->bs_var;
+			mask |= rules_strargs_scan(bc->bc_condbs);
+			mask |= rules_strargs_scan(bc->bc_elsebs);
+			break;
+		default:
+			break;
+		}
+
+		bs = SLIST_NEXT(bs, bs_next);
+	}
+
+	return mask;
+}
+
+/*
+ * Return the maximum str(argN) capture length needed from a bt_arg tree.
+ * A str(argN) with no explicit length contributes STRLEN.
+ * Returns 0 if no str(argN) calls are found.
+ */
+uint16_t
+ba_strlen(struct bt_arg *ba)
+{
+	uint16_t maxlen = 0, l;
+	struct bt_arg *inner, *lenarg;
+
+	do {
+		switch (ba->ba_type) {
+		case B_AT_FN_STR:
+			inner = (struct bt_arg *)ba->ba_value;
+			if (inner == NULL)
+				break;
+			lenarg = SLIST_NEXT(inner, ba_next);
+			if (lenarg == NULL) {
+				/* No explicit length: use default STRLEN. */
+				l = STRLEN;
+			} else if (lenarg->ba_type == B_AT_LONG) {
+				long v = (long)lenarg->ba_value;
+				l = (v > 0 && v < UINT16_MAX) ? (uint16_t)v :
+				    STRLEN;
+			} else {
+				/* Non-constant length; use default STRLEN. */
+				l = STRLEN;
+			}
+			if (l > maxlen)
+				maxlen = l;
+			break;
+		case B_AT_MAP:
+			if (ba->ba_key != NULL) {
+				l = ba_strlen(ba->ba_key);
+				if (l > maxlen)
+					maxlen = l;
+			}
+			break;
+		case B_AT_TUPLE:
+			if (ba->ba_value != NULL) {
+				l = ba_strlen((struct bt_arg *)ba->ba_value);
+				if (l > maxlen)
+					maxlen = l;
+			}
+			break;
+		case B_AT_OP_PLUS ... B_AT_OP_LOR:
+			if (ba->ba_value != NULL) {
+				l = ba_strlen((struct bt_arg *)ba->ba_value);
+				if (l > maxlen)
+					maxlen = l;
+			}
+			break;
+		default:
+			break;
+		}
+	} while ((ba = SLIST_NEXT(ba, ba_next)) != NULL);
+
+	return maxlen;
+}
+
+uint16_t
+rules_strlen_scan(struct bt_stmt *bs)
+{
+	struct bt_arg *ba;
+	struct bt_cond *bc;
+	uint16_t maxlen = 0, l;
+
+	while (bs != NULL) {
+		SLIST_FOREACH(ba, &bs->bs_args, ba_next) {
+			l = ba_strlen(ba);
+			if (l > maxlen)
+				maxlen = l;
+		}
+
+		switch (bs->bs_act) {
+		case B_AC_BUCKETIZE:
+		case B_AC_INSERT:
+			ba = (struct bt_arg *)bs->bs_var;
+			l = ba_strlen(ba);
+			if (l > maxlen)
+				maxlen = l;
+			break;
+		case B_AC_TEST:
+			bc = (struct bt_cond *)bs->bs_var;
+			l = rules_strlen_scan(bc->bc_condbs);
+			if (l > maxlen)
+				maxlen = l;
+			l = rules_strlen_scan(bc->bc_elsebs);
+			if (l > maxlen)
+				maxlen = l;
+			break;
+		default:
+			break;
+		}
+
+		bs = SLIST_NEXT(bs, bs_next);
+	}
+
+	return maxlen;
+}
+
 int
 rules_setup(int fd)
 {
@@ -603,9 +780,13 @@ rules_setup(int fd)
 	struct bt_arg *ba;
 	int dokstack = 0, halt = 0, on = 1;
 	uint64_t evtflags;
+	uint16_t strargs;
+	uint16_t strlen;
 
 	TAILQ_FOREACH(r, &g_rules, br_next) {
 		evtflags = 0;
+		strargs = 0;
+		strlen = 0;
 
 		if (r->br_filter != NULL &&
 		    r->br_filter->bf_condition != NULL)  {
@@ -614,9 +795,14 @@ rules_setup(int fd)
 			ba = SLIST_FIRST(&bs->bs_args);
 
 			evtflags |= ba2dtflags(ba);
+			strargs |= ba2strargs(ba);
+			strlen = MAXIMUM(strlen, ba_strlen(ba));
 		}
 
 		evtflags |= rules_action_scan(SLIST_FIRST(&r->br_action));
+		strargs |= rules_strargs_scan(SLIST_FIRST(&r->br_action));
+		strlen = MAXIMUM(strlen,
+		    rules_strlen_scan(SLIST_FIRST(&r->br_action)));
 
 		SLIST_FOREACH(bp, &r->br_probes, bp_next) {
 			debug("parsed probe '%s'", probe_name(bp));
@@ -661,6 +847,8 @@ rules_setup(int fd)
 				dtrq->dtrq_pbn = dtpi->dtpi_pbn;
 				dtrq->dtrq_nsecs = bp->bp_nsecs;
 				dtrq->dtrq_evtflags = evtflags;
+				dtrq->dtrq_strargs = strargs;
+				dtrq->dtrq_strlen = strlen;
 				if (dtrq->dtrq_evtflags & DTEVT_KSTACK)
 					dokstack = 1;
 				bp->bp_cookie = dtrq;
@@ -685,6 +873,8 @@ rules_setup(int fd)
 					dtrq->dtrq_pbn = dtpi->dtpi_pbn;
 					dtrq->dtrq_nsecs = bp->bp_nsecs;
 					dtrq->dtrq_evtflags = evtflags;
+					dtrq->dtrq_strargs = strargs;
+					dtrq->dtrq_strlen = strlen;
 					if (dtrq->dtrq_evtflags & DTEVT_KSTACK)
 						dokstack = 1;
 					bpnew->bp_cookie = dtrq;
@@ -1427,32 +1617,47 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 }
 
 /*
- * String conversion	{ str($1); string($1, 3); }
+ * String conversion:	{ str(arg0); str($1, 32); }
  *
- * Since fn_str is currently only called in ba2str, *buf should be a pointer
- * to the static buffer provided by ba2str.
+ * When the argument is arg0..arg9, returns the string captured by the kernel
+ * at probe fire time (via dt_copy_strargs).  For any other expression the
+ * value is converted to a string at display time.  An optional second
+ * argument limits the result to that many bytes (including the NUL).
+ *
+ * Since fn_str is only called from ba2str, *buf is the static buffer
+ * provided there.
  */
 struct bt_arg *
 fn_str(struct bt_arg *ba, struct dt_evt *dtev, char *buf)
 {
-	struct bt_arg *arg, *index;
+	struct bt_arg *arg, *lenarg;
 	ssize_t len = STRLEN;
 
 	assert(ba->ba_type == B_AT_FN_STR);
 
-	arg = (struct bt_arg*)ba->ba_value;
+	arg = (struct bt_arg *)ba->ba_value;
 	assert(arg != NULL);
 
-	index = SLIST_NEXT(arg, ba_next);
-	if (index != NULL) {
+	lenarg = SLIST_NEXT(arg, ba_next);
+	if (lenarg != NULL) {
 		/* Should have only 1 optional argument. */
-		assert(SLIST_NEXT(index, ba_next) == NULL);
-		len = MINIMUM(ba2long(index, dtev) + 1, STRLEN);
+		assert(SLIST_NEXT(lenarg, ba_next) == NULL);
+		len = MINIMUM(ba2long(lenarg, dtev) + 1, STRLEN);
 	}
 
 	/* All negative lengths behave the same as a zero length. */
 	if (len < 1)
 		return ba_new("", B_AT_STR);
+
+	/*
+	 * For probe arguments, return the string captured by the kernel at
+	 * probe fire time from the appropriate address space.
+	 */
+	if (arg->ba_type >= B_AT_BI_ARG0 && arg->ba_type <= B_AT_BI_ARG9) {
+		int argn = arg->ba_type - B_AT_BI_ARG0;
+		strlcpy(buf, dtev->dtev_str[argn], len);
+		return ba_new(buf, B_AT_STR);
+	}
 
 	strlcpy(buf, ba2str(arg, dtev), len);
 	return ba_new(buf, B_AT_STR);
@@ -2158,8 +2363,15 @@ ba2flags(struct bt_arg *ba)
 	case B_AT_MF_MAX:
 	case B_AT_MF_MIN:
 	case B_AT_MF_SUM:
-	case B_AT_FN_STR:
 		break;
+	case B_AT_FN_STR: {
+		struct bt_arg *inner = (struct bt_arg *)ba->ba_value;
+		if (inner != NULL &&
+		    inner->ba_type >= B_AT_BI_ARG0 &&
+		    inner->ba_type <= B_AT_BI_ARG9)
+			flags |= DTEVT_FUNCARGS | DTEVT_STRARGS;
+		break;
+	}
 	case B_AT_OP_PLUS ... B_AT_OP_LOR:
 		flags |= ba2dtflags(ba->ba_value);
 		break;

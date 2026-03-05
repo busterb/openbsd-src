@@ -1,0 +1,19 @@
+/*	$OpenBSD$	*/
+
+/*
+ * opencount.bt	Count file opens by path and process
+ */
+
+/* openat(dirfd, path, flags, ...) - path is arg1 */
+syscall:openat:entry {
+	@[comm, str(arg1)] = count();
+}
+
+/* open(path, flags, ...) - path is arg0 */
+syscall:open:entry {
+	@[comm, str(arg0)] = count();
+}
+
+END {
+	print(@);
+}

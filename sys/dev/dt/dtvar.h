@@ -41,6 +41,11 @@
 #define DTMAXARGTYPES	5
 
 /*
+ * Maximum length of a string argument captured by str().
+ */
+#define DT_STRLEN	1024
+
+/*
  * Event state: where to store information when a probe fires.
  */
 struct dt_evt {
@@ -66,6 +71,7 @@ struct dt_evt {
 #define dtev_args	_args.E_entry		/* function args. */
 #define dtev_retval	_args.E_return.__retval	/* function retval */
 #define dtev_error	_args.E_return.__error	/* function error */
+	char			dtev_str[DTMAXFUNCARGS][DT_STRLEN]; /* str() arg captures */
 };
 
 /*
@@ -75,6 +81,7 @@ struct dt_evt {
 #define DTEVT_USTACK	(1 << 1)		/* userland stack */
 #define DTEVT_KSTACK	(1 << 2)		/* kernel stack */
 #define DTEVT_FUNCARGS	(1 << 3)		/* function arguments */
+#define DTEVT_STRARGS	(1 << 4)		/* string arguments */
 
 #define	DTEVT_FLAG_BITS		\
 	"\020"			\
@@ -82,6 +89,7 @@ struct dt_evt {
 	"\002USTACK"		\
 	"\003KSTACK"		\
 	"\004FUNCARGS"		\
+	"\005STRARGS"		\
 
 struct dtioc_probe_info {
 	uint32_t	dtpi_pbn;		/* probe number */
@@ -110,7 +118,8 @@ struct dtioc_arg {
 
 struct dtioc_req {
 	uint32_t		 dtrq_pbn;	/* probe number */
-	uint32_t		 __unused1;
+	uint16_t		 dtrq_strargs;	/* bitmask: which args are strings */
+	uint16_t		 dtrq_strlen;	/* max bytes per str() arg capture */
 	uint64_t		 dtrq_evtflags;	/* states to record */
 	uint64_t		 dtrq_nsecs;	/* execution period */
 };
@@ -177,6 +186,8 @@ struct dt_pcb {
 	struct dt_softc		*dp_sc;		/* [I] related softc */
 	struct dt_probe		*dp_dtp;	/* [I] related probe */
 	uint64_t		 dp_evtflags;	/* [I] event states to record */
+	uint16_t		 dp_strargs;	/* [I] bitmask of str() args */
+	uint16_t		 dp_strlen;	/* [I] max bytes per str() arg capture */
 
 	/* Provider specific fields. */
 	struct clockintr	 dp_clockintr;	/* [D] profiling handle */
@@ -193,6 +204,7 @@ void		 dt_pcb_purge(struct dt_pcb_list *);
 void		 dt_pcb_ring_skiptick(struct dt_pcb *, unsigned int);
 struct dt_evt	*dt_pcb_ring_get(struct dt_pcb *, int);
 void		 dt_pcb_ring_consume(struct dt_pcb *, struct dt_evt *);
+void		 dt_copy_strargs(struct dt_evt *, uint16_t, size_t, int);
 
 /*
  * Probes are entry points in the system where events can be recorded.
