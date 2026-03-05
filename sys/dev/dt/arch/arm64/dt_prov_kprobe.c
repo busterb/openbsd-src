@@ -297,6 +297,8 @@ dt_prov_kprobe_alloc(struct dt_probe *dtp, struct dt_softc *sc,
 	}
 
 	dp->dp_evtflags = dtrq->dtrq_evtflags & DTEVT_PROV_KPROBE;
+	dp->dp_strargs = dtrq->dtrq_strargs;
+	dp->dp_strlen = dtrq->dtrq_strlen;
 	TAILQ_INSERT_HEAD(plist, dp, dp_snext);
 	return 0;
 }
@@ -364,6 +366,9 @@ dt_prov_bkpt_hook(struct trapframe *tf)
 				dtev->dtev_args[5] = tf->tf_x[5];
 			}
 
+			if (ISSET(dp->dp_evtflags, DTEVT_STRARGS))
+				dt_copy_strargs(dtev, dp->dp_strargs,
+				    dp->dp_strlen, 0);
 			dt_pcb_ring_consume(dp, dtev);
 		}
 		smr_read_leave();
