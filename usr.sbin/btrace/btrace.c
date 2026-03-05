@@ -2186,7 +2186,7 @@ ba2dtflags(struct bt_arg *ba)
 
 	do {
 		if (ba->ba_type == B_AT_MAP)
-			flags |= ba2flags(ba->ba_key);
+			flags |= ba2dtflags(ba->ba_key);
 		else if (ba->ba_type == B_AT_TUPLE) {
 			bval = ba->ba_value;
 			do {
