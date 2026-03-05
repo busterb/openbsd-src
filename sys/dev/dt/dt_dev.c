@@ -890,6 +890,36 @@ dt_pcb_ring_consume(struct dt_pcb *dp, struct dt_evt *dtev)
 }
 
 /*
+ * For each bit set in `strargs', copy the string pointed to by the
+ * corresponding dtev_args[] entry into dtev_str[].  Called at probe fire
+ * time; is_user selects copyinstr (user address space, e.g. syscall probes)
+ * or copystr (kernel address space, e.g. kprobe probes).  Errors such as
+ * bad pointers are silently ignored; the slot stays as the empty string.
+ */
+void
+dt_copy_strargs(struct dt_evt *dtev, uint16_t strargs, size_t maxlen,
+    int is_user)
+{
+	int i;
+
+	if (maxlen == 0 || maxlen > DT_STRLEN)
+		maxlen = DT_STRLEN;
+
+	for (i = 0; i < DTMAXFUNCARGS; i++) {
+		if (!(strargs & (1u << i)))
+			continue;
+		if (dtev->dtev_args[i] == 0)
+			continue;
+		if (is_user)
+			copyinstr((const void *)dtev->dtev_args[i],
+			    dtev->dtev_str[i], maxlen, NULL);
+		else
+			copystr((const void *)dtev->dtev_args[i],
+			    dtev->dtev_str[i], maxlen, NULL);
+	}
+}
+
+/*
  * Copy at most `max' events from `dc', producing the same amount
  * of free slots.
  */

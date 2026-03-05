@@ -153,7 +153,7 @@ struct bt_arg {
 		B_AT_BI_RETVAL,
 		B_AT_BI_PROBE,
 
-		B_AT_FN_STR,			/* str($1); str($1, 3); */
+		B_AT_FN_STR,			/* str(arg0); str($1, 3); */
 
 		B_AT_MF_COUNT,			/* @map[key] = count() */
 		B_AT_MF_MAX,			/* @map[key] = max(nsecs) */

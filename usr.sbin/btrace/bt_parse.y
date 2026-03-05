@@ -219,8 +219,8 @@ factor : '(' expr ')'		{ $$ = $2; }
 	| func
 	;
 
-func	: STR '(' PVAR ')'		{ $$ = ba_new($3, B_AT_FN_STR); }
-	| STR '(' PVAR ',' expr ')'	{ $$ = ba_op(B_AT_FN_STR, $3, $5); }
+func	: STR '(' factor ')'		{ $$ = ba_new($3, B_AT_FN_STR); }
+	| STR '(' factor ',' expr ')'	{ $$ = ba_op(B_AT_FN_STR, $3, $5); }
 	;
 
 vargs	: expr
