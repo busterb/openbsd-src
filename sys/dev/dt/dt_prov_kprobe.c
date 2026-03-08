@@ -195,16 +195,68 @@ db_prologue_patch(vaddr_t addr, int restore)
 	intr_restore(s);
 }
 
+#define	RET_IMM16	0xc2	/* ret $imm16 */
+
+/*
+ * Heuristic: check if a 0xc3 byte at `off' in a function might actually
+ * be part of an embedded pointer value (e.g., in a jump table) rather
+ * than a true ret instruction.
+ *
+ * If treating any byte sequence around `off' as a pointer yields an
+ * address within the function body, the 0xc3 is likely not a real ret.
+ */
+static int
+kprobe_ret_is_jump_table(uint8_t *text, int off, int size)
+{
+	uintptr_t funcstart = (uintptr_t)text;
+	uintptr_t funclimit = funcstart + size;
+	int j;
+
+	for (j = 0; j < (int)sizeof(uintptr_t); j++) {
+		int check = off - j;
+		uintptr_t ptr;
+
+		if (check < 0)
+			break;
+		if (check + (int)sizeof(uintptr_t) > size)
+			continue;
+
+		memcpy(&ptr, &text[check], sizeof(ptr));
+		if (ptr >= funcstart && ptr < funclimit)
+			return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * Find the next ret instruction at or after offset `start' in the
+ * function described by `symp'.  Returns the offset of the ret byte,
+ * or -1 when none is found.  Call repeatedly with start = previous + 1
+ * to enumerate all return sites.
+ */
 int
-db_epilogue_validate(Elf_Sym *symp)
+db_epilogue_validate(Elf_Sym *symp, int start)
 {
 	uint8_t *inst = (uint8_t *)symp->st_value;
-	int off = symp->st_size - 1;
+	int size = symp->st_size;
+	int off;
 
-	while (off > FRAME_SIZE + 2) {
-		if (inst[off - 1] == 0xcc && inst[off] == RET_INST)
-			return off;
-		off--;
+	for (off = start; off < size; off++) {
+		/* Skip ret-with-immediate (0xc2 imm16): 3 bytes total. */
+		if (inst[off] == RET_IMM16) {
+			off += 2;
+			continue;
+		}
+
+		if (inst[off] != RET_INST)
+			continue;
+
+		/* Filter out 0xc3 bytes embedded in jump tables. */
+		if (kprobe_ret_is_jump_table(inst, off, size))
+			continue;
+
+		return off;
 	}
 
 	return -1;
@@ -271,22 +323,27 @@ db_prologue_patch(vaddr_t addr, int restore)
 	intr_restore(s);
 }
 
+/*
+ * Find the next "pop %ebp; ret" (0x5d 0xc3) epilogue at or after
+ * offset `start'.  Returns the offset of the pop instruction, or -1.
+ * Call repeatedly to enumerate multiple return sites.
+ */
 int
-db_epilogue_validate(Elf_Sym *symp)
+db_epilogue_validate(Elf_Sym *symp, int start)
 {
-	vaddr_t limit = symp->st_value + symp->st_size;
-#if 0
-	/*
-	 * Little temporary hack to find some return probe
-	 *   => always int3 after 'pop %rpb; ret'
-	 */
-	while(*((uint8_t *)inst) == 0xcc)
-		(*(uint8_t *)inst) -= 1;
-#endif
-	if (*(uint8_t *)(limit - 2) != POP_RBP)
+	uint8_t *inst = (uint8_t *)symp->st_value;
+	int size = symp->st_size;
+	int off;
+
+	if (size < 2)
 		return -1;
 
-	return symp->st_size - 2;
+	for (off = start; off < size - 1; off++) {
+		if (inst[off] == POP_RBP_INST && inst[off + 1] == 0xc3)
+			return off;
+	}
+
+	return -1;
 }
 
 void
@@ -361,7 +418,7 @@ dt_prov_kprobe_init(void)
 	Elf_Sym *symp, *symtab_start, *symtab_end;
 	const char *strtab, *name;
 	vaddr_t inst;
-	int off, nb_sym, nb_probes = 0;
+	int entryoff, retoff, nb_sym, nb_probes = 0;
 
 	nb_sym = (db_symtab.end - db_symtab.start) / sizeof (Elf_Sym);
 
@@ -396,15 +453,15 @@ dt_prov_kprobe_init(void)
 		if (kprobe_excluded(name))
 			continue;
 
-		off = db_prologue_validate(symp);
-		if (off < 0)
+		entryoff = db_prologue_validate(symp);
+		if (entryoff < 0)
 			continue;
 
 		dtp = dt_dev_alloc_probe(name, "entry", &dt_prov_kprobe);
 		if (dtp == NULL)
 			break;
 
-		dtp->dtp_addr = inst + off;
+		dtp->dtp_addr = inst + entryoff;
 		dtp->dtp_type = KPROBE_ENTRY;
 		dtp->dtp_nargs = db_ctf_func_numargs(symp);
 		SLIST_INSERT_HEAD(&dtpf_entry[INSTTOIDX(dtp->dtp_addr)],
@@ -412,21 +469,24 @@ dt_prov_kprobe_init(void)
 		dt_dev_register_probe(dtp);
 		nb_probes++;
 
-		off = db_epilogue_validate(symp);
-		if (off < 0)
-			continue;
+		for (retoff = entryoff + 1;
+		    (retoff = db_epilogue_validate(symp, retoff)) >= 0;
+		    retoff++) {
+			dtp = dt_dev_alloc_probe(name, "return",
+			    &dt_prov_kprobe);
+			if (dtp == NULL)
+				goto done;
 
-		dtp = dt_dev_alloc_probe(name, "return", &dt_prov_kprobe);
-		if (dtp == NULL)
-			break;
-
-		dtp->dtp_addr = inst + off;
-		dtp->dtp_type = KPROBE_RETURN;
-		SLIST_INSERT_HEAD(&dtpf_return[INSTTOIDX(dtp->dtp_addr)],
-		    dtp, dtp_knext);
-		dt_dev_register_probe(dtp);
-		nb_probes++;
+			dtp->dtp_addr = inst + retoff;
+			dtp->dtp_type = KPROBE_RETURN;
+			SLIST_INSERT_HEAD(
+			    &dtpf_return[INSTTOIDX(dtp->dtp_addr)],
+			    dtp, dtp_knext);
+			dt_dev_register_probe(dtp);
+			nb_probes++;
+		}
 	}
+done:
 
 	return nb_probes;
 }
