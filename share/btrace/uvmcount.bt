@@ -12,4 +12,5 @@ kprobe:uvm_* {
 
 interval:s:5 {
 	print(@);
+	clear(@);
 }
