@@ -17,7 +17,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#if defined(DDBPROF) && (defined(__amd64__) || defined(__i386__))
+#if defined(__amd64__) || defined(__i386__)
 
 #include <sys/types.h>
 #include <sys/systm.h>
@@ -39,9 +39,7 @@
 
 extern db_symtab_t	db_symtab;
 extern char		__kutext_end[];
-extern int		db_prof_on;
 
-extern void	db_prof_count(struct trapframe *);
 extern vaddr_t	db_get_probe_addr(struct trapframe *);
 
 /* Lists of probes per ELF symbol. */
@@ -60,6 +58,14 @@ struct dt_provider dt_prov_kprobe = {
 	.dtpv_name    = "kprobe",
 	.dtpv_alloc   = dt_prov_kprobe_alloc,
 	.dtpv_enter   = dt_prov_kprobe_hook,
+	.dtpv_leave   = NULL,
+	.dtpv_dealloc = dt_prov_kprobe_dealloc,
+};
+
+struct dt_provider dt_prov_kretprobe = {
+	.dtpv_name    = "kretprobe",
+	.dtpv_alloc   = dt_prov_kprobe_alloc,
+	.dtpv_enter   = NULL,
 	.dtpv_leave   = NULL,
 	.dtpv_dealloc = dt_prov_kprobe_dealloc,
 };
@@ -457,7 +463,7 @@ dt_prov_kprobe_init(void)
 		if (entryoff < 0)
 			continue;
 
-		dtp = dt_dev_alloc_probe(name, "entry", &dt_prov_kprobe);
+		dtp = dt_dev_alloc_probe(name, "", &dt_prov_kprobe);
 		if (dtp == NULL)
 			break;
 
@@ -472,8 +478,8 @@ dt_prov_kprobe_init(void)
 		for (retoff = entryoff + 1;
 		    (retoff = db_epilogue_validate(symp, retoff)) >= 0;
 		    retoff++) {
-			dtp = dt_dev_alloc_probe(name, "return",
-			    &dt_prov_kprobe);
+			dtp = dt_dev_alloc_probe(name, "",
+			    &dt_prov_kretprobe);
 			if (dtp == NULL)
 				goto done;
 
@@ -678,4 +684,22 @@ dt_prov_kprobe_depatch_all_entry(void)
 
 	}
 }
+#endif /* __amd64__ || __i386__ */
+
+#else /* !defined(__amd64__) && !defined(__i386__) */
+
+struct trapframe;
+
+int
+dt_prov_kprobe_init(void)
+{
+	return 0;
+}
+
+int
+dt_prov_bkpt_hook(struct trapframe *tf)
+{
+	return -1;
+}
+
 #endif /* __amd64__ || __i386__ */
