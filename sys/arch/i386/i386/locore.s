@@ -1209,13 +1209,8 @@ calltrap:
 	jne	.Lreal_trap
 
 	pushl	%esp
-	subl	$4, %esp
-	pushl	%eax
-	leal	dt_prov_kprobe, %eax
-	movl	%eax, 4(%esp)
-	popl	%eax
-	call	dt_prov_kprobe_hook
-	addl	$8, %esp
+	call	dt_prov_bkpt_hook
+	addl	$4, %esp
 	cmpl	$0, %eax
 	je	.Lreal_trap
 
