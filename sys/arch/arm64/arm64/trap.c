@@ -49,6 +49,11 @@
 #include <machine/db_machdep.h>
 #endif
 
+#include "dt.h"
+#if NDT > 0
+#include <dev/dt/dtvar.h>
+#endif
+
 /* Called from exception.S */
 void do_el1h_sync(struct trapframe *);
 void do_el0_sync(struct trapframe *);
@@ -341,6 +346,47 @@ do_el1h_sync(struct trapframe *frame)
 		kdata_abort(frame, esr, far, 0);
 		break;
 	case EXCP_BRK:
+#if NDT > 0
+		if ((esr & ISS_BRK_COMMENT_MASK) == 0) {
+			extern uint32_t dt_prov_bkpt_savedinsn[];
+			int rc = dt_prov_bkpt_hook(frame);
+			if (rc == 1) {
+				/*
+				 * Emulate stp x29, x30, [sp, #imm]!
+				 * or stp x29, x30, [sp, #off].
+				 */
+				uint32_t insn =
+				    dt_prov_bkpt_savedinsn[cpu_number()];
+				int32_t imm7 =
+				    (int32_t)((insn >> 15) & 0x7f);
+				if (imm7 & 0x40)
+					imm7 |= ~0x7f;
+				int64_t off = (int64_t)imm7 * 8;
+				if (insn & (1 << 23)) {
+					/* Pre-indexed: update SP first */
+					frame->tf_sp += off;
+					*(uint64_t *)(frame->tf_sp) =
+					    frame->tf_x[29];
+					*(uint64_t *)(frame->tf_sp + 8) =
+					    frame->tf_lr;
+				} else {
+					/* Signed offset: SP unchanged */
+					*(uint64_t *)(frame->tf_sp + off) =
+					    frame->tf_x[29];
+					*(uint64_t *)(frame->tf_sp + off + 8) =
+					    frame->tf_lr;
+				}
+				frame->tf_elr += INSN_SIZE;
+				break;
+			}
+			if (rc == 2) {
+				/* Emulate ret: branch to link register */
+				frame->tf_elr = frame->tf_lr;
+				break;
+			}
+		}
+#endif
+	/* FALLTHROUGH */
 	case EXCP_WATCHPT_EL1:
 	case EXCP_SOFTSTP_EL1:
 #ifdef DDB
