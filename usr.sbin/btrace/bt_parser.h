@@ -109,6 +109,7 @@ struct bt_var {
 		B_VT_MAP,
 		B_VT_HIST,
 	}			 bv_type;
+	int			 bv_printed;	/* was explicitly printed */
 };
 
 /*

@@ -851,6 +851,10 @@ rule_printmaps(struct bt_rule *r)
 			if (map == NULL)
 				continue;
 
+			/* Skip maps already printed with print(). */
+			if (bv->bv_printed)
+				continue;
+
 			if (ba->ba_type == B_AT_MAP)
 				map_print(map, SIZE_T_MAX, bv_name(bv));
 			else
@@ -1182,6 +1186,7 @@ stmt_bucketize(struct bt_stmt *bs, struct dt_evt *dtev)
 
 	bv->bv_value = (struct bt_arg *)hist;
 	bv->bv_type = B_VT_HIST;
+	bv->bv_printed = 0;
 }
 
 
@@ -1207,6 +1212,7 @@ stmt_clear(struct bt_stmt *bs)
 
 	map_clear(map);
 	bv->bv_value = NULL;
+	bv->bv_printed = 0;
 
 	debug("map=%p '%s' clear\n", map, bv_name(bv));
 }
@@ -1299,6 +1305,7 @@ stmt_insert(struct bt_stmt *bs, struct dt_evt *dtev)
 
 	bv->bv_value = (struct bt_arg *)map;
 	bv->bv_type = B_VT_MAP;
+	bv->bv_printed = 0;
 }
 
 /*
@@ -1337,11 +1344,13 @@ stmt_print(struct bt_stmt *bs, struct dt_evt *dtev)
 
 	debug("map=%p '%s' print (top=%d)\n", bv->bv_value, bv_name(bv), top);
 
-	if (bv->bv_type == B_VT_MAP)
+	if (bv->bv_type == B_VT_MAP) {
 		map_print(map, top, bv_name(bv));
-	else if (bv->bv_type == B_VT_HIST)
+		bv->bv_printed = 1;
+	} else if (bv->bv_type == B_VT_HIST) {
 		hist_print((struct hist *)map, bv_name(bv));
-	else
+		bv->bv_printed = 1;
+	} else
 		printf("%s\n", ba2str(ba, dtev));
 }
 
