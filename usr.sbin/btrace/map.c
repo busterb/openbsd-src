@@ -223,8 +223,8 @@ hist_increment(struct hist *hist, const char *bucket)
 	ba->ba_value = (void *)val;
 }
 
-long
-hist_get_bin_suffix(long bin, char **suffix)
+long long
+hist_get_bin_suffix(long long bin, char **suffix)
 {
 #define EXA	(PETA * 1024)
 #define PETA	(TERA * 1024)
@@ -266,27 +266,27 @@ hist_get_bin_suffix(long bin, char **suffix)
  * and `hstep' the width of the interval.
  */
 static inline int
-hist_print_bucket(char *buf, size_t buflen, long upb, long hstep)
+hist_print_bucket(char *buf, size_t buflen, long long upb, long long hstep)
 {
 	int l;
 
 	if (hstep != 0) {
 		/* Linear histogram */
-		l = snprintf(buf, buflen, "[%lu, %lu)", upb - hstep, upb);
+		l = snprintf(buf, buflen, "[%llu, %llu)", upb - hstep, upb);
 	} else {
 		/* Power-of-two histogram */
 		if (upb < 0) {
 			l = snprintf(buf, buflen, "(..., 0)");
 		} else if (upb == 0) {
-			l = snprintf(buf, buflen, "[%lu]", upb);
+			l = snprintf(buf, buflen, "[%llu]", upb);
 		} else {
-			long lob = upb / 2;
+			long long lob = upb / 2;
 			char *lsuf, *usuf;
 
 			upb = hist_get_bin_suffix(upb, &usuf);
 			lob = hist_get_bin_suffix(lob, &lsuf);
 
-			l = snprintf(buf, buflen, "[%lu%s, %lu%s)",
+			l = snprintf(buf, buflen, "[%llu%s, %llu%s)",
 			    lob, lsuf, upb, usuf);
 		}
 	}
@@ -303,7 +303,8 @@ hist_print(struct hist *hist, const char *name)
 	struct map *map = &hist->hmap;
 	static char buf[80];
 	struct mentry *mep, *mcur;
-	long bmin, bprev, bin, val, max = 0;
+	long long bmin, bprev, bin;
+	long val, max = 0;
 	int i, l, length = 52;
 
 	if (map == NULL)
@@ -323,10 +324,10 @@ hist_print(struct hist *hist, const char *name)
 	bprev = -1;
 	for (;;) {
 		mcur = NULL;
-		bmin = LONG_MAX;
+		bmin = LLONG_MAX;
 
 		RB_FOREACH(mep, map, map) {
-			bin = atol(mep->mkey);
+			bin = atoll(mep->mkey);
 			if ((bin <= bmin) && (bin > bprev)) {
 				mcur = mep;
 				bmin = bin;
@@ -335,7 +336,7 @@ hist_print(struct hist *hist, const char *name)
 		if (mcur == NULL)
 			break;
 
-		bin = atol(mcur->mkey);
+		bin = atoll(mcur->mkey);
 		val = ba2long(mcur->mval, NULL);
 		i = (length * val) / max;
 		l = hist_print_bucket(buf, sizeof(buf), bin, hist->hstep);
