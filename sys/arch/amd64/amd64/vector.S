@@ -85,6 +85,7 @@
 #include "hyperv.h"
 #include "vmm.h"
 #include "xcall.h"
+#include "dt.h"
 
 /*****************************************************************************/
 
@@ -184,9 +185,9 @@ KUENTRY(calltrap_specstk_tramp)
 	iretq
 
 IDTVEC(trap03)
-#if defined(GPROF) || !defined(DDBPROF)
+#if defined(GPROF) || NDT < 1
 	ZTRAP(T_BPTFLT)
-#else /* !defined(GPROF) && defined(DDBPROF) */
+#else /* !defined(GPROF) && NDT > 0 */
 	pushq	$0
 	pushq	$T_BPTFLT
 	testb	$SEL_RPL,24(%rsp)
@@ -275,7 +276,7 @@ INTRENTRY_LABEL(trap03):
 .ret_int3:
 	addq	$TF_RIP,%rsp
 	iretq
-#endif /* !defined(GPROF) && defined(DDBPROF) */
+#endif /* !defined(GPROF) && NDT > 0 */
 
 IDTVEC(trap04)
 	ZTRAP(T_OFLOW)	# impossible: INTO instruction invalid in amd64
