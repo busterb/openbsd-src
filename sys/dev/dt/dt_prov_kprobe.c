@@ -83,54 +83,92 @@ ptr_hash(uint32_t a) {
 #define	INSTTOIDX(inst)	(ptr_hash(inst) & PPTMASK)
 
 #if defined(__amd64__)
+
+/*
+ * IBT endbr64 prefix: f3 0f 1e fa (4 bytes)
+ */
 #define	IBT_SIZE	4
+
+/*
+ * RetGuard prefix:
+ *   4c 8b 1d xx xx xx xx	mov off(%rip), %r11  (7 bytes)
+ *   4c 33 1c xx		xorq off(%rsp), %r11 (4 bytes)
+ */
 #define	RTGD_MOV_SIZE	7
 #define	RTGD_XOR_SIZE	4
-#define	FRAME_SIZE	(IBT_SIZE + RTGD_XOR_SIZE + RTGD_XOR_SIZE + 1 + 3)
 
-#define	RET_INST	0xc3
+#define	PUSH_RBP	0x55		/* push %rbp */
+#define	RET_INST	0xc3		/* ret */
 #define	RET_SIZE	1
 
 /*
- * Validate that this prologue respect a well-known layout and return
- * the offset where the symbol can be patched.
+ * Find the offset of the frame pointer setup in a function's prologue.
+ *
+ * First try the fast path: push %rbp immediately after known IBT and
+ * RetGuard prefixes.  If that fails, do a wider scan for the full
+ * frame setup sequence "push %rbp; mov %rsp, %rbp" (55 48 89 e5).
+ * The 4-byte sequence is safe to search for even in shrink-wrapped
+ * functions where the compiler may place early-exit code before the
+ * frame pointer setup.
+ *
+ * Returns the offset of push %rbp from the function start, or -1 if
+ * not found within a reasonable distance.
  */
-// XXX use db_get_value();
 int
 db_prologue_validate(Elf_Sym *symp)
 {
 	uint8_t *inst = (uint8_t *)symp->st_value;
-	int off = symp->st_size - 1;
+	int size = symp->st_size;
+	int off = 0;
+	int limit;
 
-	if (off < IBT_SIZE + RTGD_MOV_SIZE + RTGD_XOR_SIZE)
+	if (size < 1)
 		return -1;
 
-	/* Check for IBT */
-	if (inst[0] != 0xf3 || inst[1] != 0x0f ||
-	    inst[2] != 0x1e || inst[3] != 0xfa)
-		return -1;
+	limit = (size < 32) ? size : 32;
 
-	/* Check for retguard */
-	off = IBT_SIZE;
-	if (inst[off] != 0x4c || inst[off + 1] != 0x8b || inst[off + 2] != 0x1d)
-	    	return -1;
+	/*
+	 * Fast path: skip known prefix instructions and expect
+	 * push %rbp immediately after.
+	 *
+	 * IBT (endbr64): f3 0f 1e fa
+	 */
+	if (off + IBT_SIZE <= limit &&
+	    inst[off] == 0xf3 && inst[off + 1] == 0x0f &&
+	    inst[off + 2] == 0x1e && inst[off + 3] == 0xfa)
+		off += IBT_SIZE;
 
-	/* Check for `xorq off(%rsp), %reg' */
-	off += RTGD_MOV_SIZE;
-	if (inst[off] != 0x4c || inst[off + 1] != 0x33 || inst[off + 2] != 0x1c)
-		return -1;
+	/* RetGuard mov: 4c 8b 1d xx xx xx xx */
+	if (off + RTGD_MOV_SIZE <= limit &&
+	    inst[off] == 0x4c && inst[off + 1] == 0x8b &&
+	    inst[off + 2] == 0x1d)
+		off += RTGD_MOV_SIZE;
 
-	/* Check for `pushq %rbp' */
-	off += RTGD_XOR_SIZE;
-	if (inst[off] != SSF_INST)
-		return -1;
+	/* RetGuard xor: 4c 33 1c xx */
+	if (off + RTGD_XOR_SIZE <= limit &&
+	    inst[off] == 0x4c && inst[off + 1] == 0x33 &&
+	    inst[off + 2] == 0x1c)
+		off += RTGD_XOR_SIZE;
 
-	/* Check for `movq %rsp, %rbp'  */
-	if (inst[off + 1] != 0x48 || inst[off + 2] != 0x89 ||
-	    inst[off + 3] != 0xe5)
-	    	return -1;
+	if (off < limit && inst[off] == PUSH_RBP)
+		return off;
 
-	return off;
+	/*
+	 * Slow path: the compiler may have shrink-wrapped the function,
+	 * placing early-exit code before the frame setup.  Scan for the
+	 * full "push %rbp; mov %rsp, %rbp" sequence (55 48 89 e5) which
+	 * is unlikely to appear as operands of other instructions.
+	 */
+	limit = (size < 256) ? size : 256;
+	for (off = 0; off + 3 < limit; off++) {
+		if (inst[off] == PUSH_RBP &&
+		    inst[off + 1] == 0x48 &&
+		    inst[off + 2] == 0x89 &&
+		    inst[off + 3] == 0xe5)
+			return off;
+	}
+
+	return -1;
 }
 
 /*
