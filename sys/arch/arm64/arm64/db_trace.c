@@ -195,3 +195,10 @@ stacktrace_save_utrace(struct stacktrace *st)
 {
 	st->st_count = 0;
 }
+
+vaddr_t
+db_get_probe_addr(struct trapframe *tf)
+{
+	/* arm64: ELR points AT the brk instruction, no adjustment needed. */
+	return tf->tf_elr;
+}
