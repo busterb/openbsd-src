@@ -198,17 +198,14 @@ IDTVEC(trap03)
 INTRENTRY_LABEL(trap03):
 	FENCE_NO_SAFE_SMAP
 	TRAP_ENTRY_KERN
-	sti
 	cld
 	SMAP_CLAC
-	leaq	dt_prov_kprobe, %rdi
-	movq	%rsp, %rsi
-	call	dt_prov_kprobe_hook
+	movq	%rsp, %rdi
+	call	dt_prov_bkpt_hook
 	movq	$0,-8(%rsp)
 	cmpl    $0, %eax
-	je     .Lreal_kern_trap
+	je     .Ldt_kern_trap
 
-	cli
 	movq	TF_RDI(%rsp),%rdi
 	movq	TF_RSI(%rsp),%rsi
 	movq	TF_R8(%rsp),%r8
@@ -276,6 +273,10 @@ INTRENTRY_LABEL(trap03):
 .ret_int3:
 	addq	$TF_RIP,%rsp
 	iretq
+
+.Ldt_kern_trap:
+	sti
+	jmp	.Lreal_kern_trap
 #endif /* !defined(GPROF) && NDT > 0 */
 
 IDTVEC(trap04)
