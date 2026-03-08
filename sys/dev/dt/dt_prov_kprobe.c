@@ -273,6 +273,48 @@ db_epilogue_patch(vaddr_t addr, int restore)
 }
 #endif /* defined(__i386__) */
 
+/*
+ * Check if a function name should be excluded from instrumentation
+ * to avoid recursive tracing and other hazards.
+ */
+static int
+kprobe_excluded(const char *name)
+{
+	/* DT framework */
+	if (strncmp(name, "dt_", 3) == 0)
+		return 1;
+
+	/* Trap and interrupt handling */
+	if (strncmp(name, "trap", 4) == 0)
+		return 1;
+
+	/* DDB debugger */
+	if (strncmp(name, "db_", 3) == 0)
+		return 1;
+	if (strncmp(name, "ddb_", 4) == 0)
+		return 1;
+
+	/* Low-level CPU and interrupt functions */
+	if (strncmp(name, "intr_", 5) == 0)
+		return 1;
+
+	/* Softintr (used by dt_wakeup) */
+	if (strncmp(name, "softintr_", 9) == 0)
+		return 1;
+
+	/* SMR read-side (used in probe firing path) */
+	if (strcmp(name, "smr_read_enter") == 0 ||
+	    strcmp(name, "smr_read_leave") == 0)
+		return 1;
+
+	/* Nanotime (called during event recording) */
+	if (strcmp(name, "nanotime") == 0 ||
+	    strcmp(name, "nanouptime") == 0)
+		return 1;
+
+	return 0;
+}
+
 /* Initialize all entry and return probes and store them in global arrays */
 int
 dt_prov_kprobe_init(void)
@@ -312,10 +354,8 @@ dt_prov_kprobe_init(void)
 		if (inst < KERNBASE || inst >= (vaddr_t)&__kutext_end)
 			continue;
 
-		/* Remove some function to avoid recursive tracing */
-		if (strncmp(name, "dt_", 3) == 0 ||
-		    strncmp(name, "trap", 4) == 0 ||
-		    strncmp(name, "db_", 3) == 0)
+		/* Remove some functions to avoid recursive tracing */
+		if (kprobe_excluded(name))
 			continue;
 
 		off = db_prologue_validate(symp);
