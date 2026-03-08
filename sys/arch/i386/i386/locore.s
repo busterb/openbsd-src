@@ -38,6 +38,7 @@
 
 #include "npx.h"
 #include "assym.h"
+#include "dt.h"
 #include "lapic.h"
 
 #include <sys/errno.h>
@@ -1203,7 +1204,7 @@ calltrap:
 #ifdef DIAGNOSTIC
 	movl	CPL,%ebx
 #endif /* DIAGNOSTIC */
-#if !defined(GPROF) && defined(DDBPROF)
+#if !defined(GPROF) && NDT > 0
 	cmpl	$T_BPTFLT,TF_TRAPNO(%esp)
 	jne	.Lreal_trap
 
@@ -1235,7 +1236,7 @@ calltrap:
 	movl	$INTR_FAKE_TRAP_POP_RBP, TF_ERR(%esp)
 	jmp	.Lalltraps_check_asts
 .Lreal_trap:
-#endif /* !defined(GPROF) && defined(DDBPROF) */
+#endif /* !defined(GPROF) && NDT > 0 */
 	pushl	%esp
 	call	trap
 	addl	$4,%esp
@@ -1254,7 +1255,7 @@ calltrap:
 	addl	$4,%esp
 	jmp	.Lalltraps_check_asts
 1:
-#if !defined(GPROF) && defined(DDBPROF)
+#if !defined(GPROF) && NDT > 0
 	/*
 	 * If we are returning from a probe trap we need to fix the
 	 * stack layout and emulate the patched instruction.
@@ -1266,7 +1267,7 @@ calltrap:
 	je	.Lprobe_fixup_push_rbp
 	cmpl	$INTR_FAKE_TRAP_POP_RBP, TF_ERR(%esp)
 	je	.Lprobe_fixup_pop_rbp
-#endif /* !defined(GPROF) && defined(DDBPROF) */
+#endif /* !defined(GPROF) && NDT > 0 */
 #ifndef DIAGNOSTIC
 	INTRFASTEXIT
 #else
@@ -1292,7 +1293,7 @@ spl_lowered:
 #endif /* DIAGNOSTIC */
 
 	.text
-#if !defined(GPROF) && defined(DDBPROF)
+#if !defined(GPROF) && NDT > 0
 .Lprobe_fixup_push_rbp:
 	/* Restore all register unwinding the stack. */
 	INTR_RESTORE_ALL
@@ -1338,7 +1339,7 @@ spl_lowered:
 	popl	%eax
 	addl	$8, %esp
 	iret
-#endif /* !defined(GPROF) && defined(DDBPROF) */
+#endif /* !defined(GPROF) && NDT > 0 */
 
 	.text
 #ifdef DIAGNOSTIC
