@@ -109,6 +109,7 @@ void			 rule_printmaps(struct bt_rule *);
  * Language builtins & functions.
  */
 uint64_t		 builtin_nsecs(struct dt_evt *);
+uint64_t		 builtin_elapsed(struct dt_evt *);
 const char		*builtin_arg(struct dt_evt *, enum bt_argtype);
 struct bt_arg		*fn_str(struct bt_arg *, struct dt_evt *, char *);
 uint16_t		 ba2strargs(struct bt_arg *);
@@ -177,6 +178,7 @@ int			 nargs = 0;
 int			 verbose = 0;
 int			 quiet = 0;
 int			 dtfd;
+uint64_t		 g_start_nsecs;
 volatile sig_atomic_t	 quit_pending;
 
 static void
@@ -552,6 +554,7 @@ rules_do(int fd)
 		err(1, "sigaction");
 
 	halt = rules_setup(fd);
+	g_start_nsecs = builtin_nsecs(NULL);
 
 	if (!quiet && g_nprobes > 0)
 		fprintf(stderr, "Attaching %d probe%s...\n",
@@ -1196,6 +1199,12 @@ builtin_nsecs(struct dt_evt *dtev)
 	}
 
 	return TIMESPEC_TO_NSEC(&dtev->dtev_tsp);
+}
+
+uint64_t
+builtin_elapsed(struct dt_evt *dtev)
+{
+	return builtin_nsecs(dtev) - g_start_nsecs;
 }
 
 const char *
@@ -2353,6 +2362,7 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AT_BI_TID:
 	case B_AT_BI_CPU:
 	case B_AT_BI_NSECS:
+	case B_AT_BI_ELAPSED:
 	case B_AT_BI_UID:
 	case B_AT_BI_GID:
 	case B_AT_BI_RETVAL:
@@ -2527,6 +2537,7 @@ baeval(struct bt_arg *bval, struct dt_evt *dtev)
 	case B_AT_BI_TID:
 	case B_AT_BI_CPU:
 	case B_AT_BI_NSECS:
+	case B_AT_BI_ELAPSED:
 	case B_AT_BI_UID:
 	case B_AT_BI_GID:
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
@@ -2803,6 +2814,8 @@ ba_name(struct bt_arg *ba)
 		return "cpu";
 	case B_AT_BI_NSECS:
 		return "nsecs";
+	case B_AT_BI_ELAPSED:
+		return "elapsed";
 	case B_AT_BI_UID:
 		return "uid";
 	case B_AT_BI_GID:
@@ -2970,6 +2983,9 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_BI_NSECS:
 		val = builtin_nsecs(dtev);
 		break;
+	case B_AT_BI_ELAPSED:
+		val = builtin_elapsed(dtev);
+		break;
 	case B_AT_BI_UID:
 		val = dtev->dtev_uid;
 		break;
@@ -3095,6 +3111,10 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		break;
 	case B_AT_BI_NSECS:
 		snprintf(buf, sizeof(buf), "%llu", builtin_nsecs(dtev));
+		str = buf;
+		break;
+	case B_AT_BI_ELAPSED:
+		snprintf(buf, sizeof(buf), "%llu", builtin_elapsed(dtev));
 		str = buf;
 		break;
 	case B_AT_BI_UID:
@@ -3241,6 +3261,7 @@ ba2flags(struct bt_arg *ba)
 	case B_AT_BI_PID:
 	case B_AT_BI_TID:
 	case B_AT_BI_NSECS:
+	case B_AT_BI_ELAPSED:
 	case B_AT_BI_UID:
 	case B_AT_BI_GID:
 		break;

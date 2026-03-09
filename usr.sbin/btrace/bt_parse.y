@@ -947,6 +947,7 @@ lookup(char *s)
 		{ "count",	MOP0, 		B_AT_MF_COUNT },
 		{ "cpu",	BUILTIN,	B_AT_BI_CPU },
 		{ "delete",	F_DELETE,	B_AC_DELETE },
+		{ "elapsed",	BUILTIN,	B_AT_BI_ELAPSED },
 		{ "else",	ELSE,		0 },
 		{ "exit",	FUNC0,		B_AC_EXIT },
 		{ "for",	FOR,		0 },

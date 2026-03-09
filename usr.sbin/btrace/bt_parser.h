@@ -138,6 +138,7 @@ struct bt_arg {
 		B_AT_BI_COMM,
 		B_AT_BI_CPU,
 		B_AT_BI_NSECS,
+		B_AT_BI_ELAPSED,
 		B_AT_BI_UID,
 		B_AT_BI_GID,
 		B_AT_BI_KSTACK,
