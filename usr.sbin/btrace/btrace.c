@@ -94,6 +94,12 @@ uint16_t		 ba2strargs(struct bt_arg *);
 uint16_t		 rules_strargs_scan(struct bt_stmt *);
 uint16_t		 ba_strlen(struct bt_arg *);
 uint16_t		 rules_strlen_scan(struct bt_stmt *);
+int			 ctf_resolve_deref(const char *, int, const char *,
+			     uint32_t *, uint16_t *);
+void			 ba_fill_deref(struct bt_arg *, struct dtioc_probe_info *,
+			     struct dtioc_req *);
+void			 fill_memcap(struct bt_stmt *, struct dtioc_probe_info *,
+			     struct dtioc_req *);
 int			 stmt_eval(struct bt_stmt *, struct dt_evt *);
 void			 stmt_bucketize(struct bt_stmt *, struct dt_evt *);
 void			 stmt_clear(struct bt_stmt *);
@@ -852,6 +858,13 @@ rules_setup(int fd)
 				dtrq->dtrq_evtflags = evtflags;
 				dtrq->dtrq_strargs = strargs;
 				dtrq->dtrq_strlen = strlen;
+				fill_memcap(SLIST_FIRST(&r->br_action),
+				    dtpi, dtrq);
+				if (r->br_filter &&
+				    r->br_filter->bf_condition)
+					fill_memcap(
+					    r->br_filter->bf_condition,
+					    dtpi, dtrq);
 				if (dtrq->dtrq_evtflags & DTEVT_KSTACK)
 					dokstack = 1;
 				bp->bp_cookie = dtrq;
@@ -878,6 +891,13 @@ rules_setup(int fd)
 					dtrq->dtrq_evtflags = evtflags;
 					dtrq->dtrq_strargs = strargs;
 					dtrq->dtrq_strlen = strlen;
+					fill_memcap(SLIST_FIRST(
+					    &r->br_action), dtpi, dtrq);
+					if (r->br_filter &&
+					    r->br_filter->bf_condition)
+						fill_memcap(
+						    r->br_filter->bf_condition,
+						    dtpi, dtrq);
 					if (dtrq->dtrq_evtflags & DTEVT_KSTACK)
 						dokstack = 1;
 					bpnew->bp_cookie = dtrq;
@@ -1286,6 +1306,204 @@ builtin_arg(struct dt_evt *dtev, enum bt_argtype dat)
 }
 
 /*
+ * CTF member iterator callback for ctf_resolve_deref().
+ * Stops at the first member whose name matches info->field.
+ */
+struct deref_info {
+	const char	*field;
+	uint32_t	 offset;	/* byte offset of member */
+	uint16_t	 size;		/* size of member type in bytes */
+	int		 found;
+};
+
+static int
+deref_member_cb(const char *name, uint16_t typeid, unsigned long offset_bits,
+    void *arg)
+{
+	struct deref_info *info = arg;
+	ssize_t sz;
+
+	if (strcmp(name, info->field) != 0)
+		return 0;
+
+	info->offset = (uint32_t)(offset_bits / 8);
+	sz = ctf_type_size(ctf_handle, typeid);
+	if (sz <= 0 || sz > (ssize_t)sizeof(uint64_t))
+		sz = sizeof(uint64_t);
+	info->size = (uint16_t)sz;
+	info->found = 1;
+	return 1;	/* stop iteration */
+}
+
+/*
+ * Using CTF, resolve the byte offset and size of `field' in the struct
+ * pointed to by argument `argn' of kernel function `funcname'.
+ * Returns 0 on success, -1 if CTF is unavailable or resolution fails.
+ */
+int
+ctf_resolve_deref(const char *funcname, int argn, const char *field,
+    uint32_t *offsetp, uint16_t *sizep)
+{
+	uint16_t argtypes[DTMAXFUNCARGS];
+	uint16_t ret_type, typeid, ref;
+	uint16_t kind;
+	struct deref_info info;
+	int nargs, depth;
+
+	if (ctf_handle == NULL)
+		return -1;
+
+	nargs = ctf_func_info(ctf_handle, funcname, &ret_type, argtypes,
+	    DTMAXFUNCARGS);
+	if (nargs <= 0 || argn >= nargs)
+		return -1;
+
+	typeid = argtypes[argn];
+
+	/* Resolve typedefs and qualifiers to get the actual kind. */
+	for (depth = 0; depth < 16; depth++) {
+		kind = ctf_type_kind(ctf_handle, typeid);
+		switch (kind) {
+		case CTF_K_TYPEDEF:
+		case CTF_K_VOLATILE:
+		case CTF_K_CONST:
+		case CTF_K_RESTRICT:
+			typeid = ctf_type_reference(ctf_handle, typeid);
+			if (typeid == 0)
+				return -1;
+			continue;
+		default:
+			break;
+		}
+		break;
+	}
+
+	if (kind != CTF_K_POINTER)
+		return -1;
+
+	/* Dereference the pointer to get the pointed-to type. */
+	ref = ctf_type_reference(ctf_handle, typeid);
+	if (ref == 0)
+		return -1;
+
+	/* Resolve typedefs in the pointed-to type. */
+	for (depth = 0; depth < 16; depth++) {
+		kind = ctf_type_kind(ctf_handle, ref);
+		switch (kind) {
+		case CTF_K_TYPEDEF:
+		case CTF_K_VOLATILE:
+		case CTF_K_CONST:
+		case CTF_K_RESTRICT:
+			ref = ctf_type_reference(ctf_handle, ref);
+			if (ref == 0)
+				return -1;
+			continue;
+		default:
+			break;
+		}
+		break;
+	}
+
+	if (kind != CTF_K_STRUCT && kind != CTF_K_UNION)
+		return -1;
+
+	memset(&info, 0, sizeof(info));
+	info.field = field;
+	ctf_member_iter(ctf_handle, ref, deref_member_cb, &info);
+	if (!info.found)
+		return -1;
+
+	*offsetp = info.offset;
+	*sizep = info.size;
+	return 0;
+}
+
+/*
+ * Walk a bt_arg tree and for each B_AT_FN_DEREF node, resolve the
+ * struct field offset/size via CTF and fill in the probe's dtrq_memcap.
+ * Also stores resolved offset/size in bt_deref for use at display time.
+ */
+void
+ba_fill_deref(struct bt_arg *ba, struct dtioc_probe_info *dtpi,
+    struct dtioc_req *dtrq)
+{
+	struct bt_deref *bd;
+	uint32_t offset;
+	uint16_t size;
+	int argn;
+
+	while (ba != NULL) {
+		switch (ba->ba_type) {
+		case B_AT_FN_DEREF:
+			bd = ba->ba_value;
+			argn = bd->bd_base->ba_type - B_AT_BI_ARG0;
+			if (ctf_resolve_deref(dtpi->dtpi_func, argn,
+			    bd->bd_field, &offset, &size) == 0) {
+				dtrq->dtrq_memcap[argn].dtrmc_offset = offset;
+				dtrq->dtrq_memcap[argn].dtrmc_size = size;
+				dtrq->dtrq_memargs |= (1u << argn);
+				dtrq->dtrq_evtflags |= DTEVT_MEMARGS;
+				bd->bd_offset = offset;
+				bd->bd_size = size;
+			} else if (verbose) {
+				warnx("cannot resolve '%s->%s' for probe %s",
+				    ba_name(bd->bd_base), bd->bd_field,
+				    dtpi->dtpi_func);
+			}
+			break;
+		case B_AT_MAP:
+			if (ba->ba_key != NULL)
+				ba_fill_deref(ba->ba_key, dtpi, dtrq);
+			break;
+		case B_AT_TUPLE:
+			if (ba->ba_value != NULL)
+				ba_fill_deref(ba->ba_value, dtpi, dtrq);
+			break;
+		case B_AT_OP_PLUS ... B_AT_OP_SHR:
+			if (ba->ba_value != NULL)
+				ba_fill_deref(ba->ba_value, dtpi, dtrq);
+			break;
+		default:
+			break;
+		}
+		ba = SLIST_NEXT(ba, ba_next);
+	}
+}
+
+/*
+ * Walk a statement list and call ba_fill_deref() on all argument trees,
+ * filling in struct member capture specs for each deref node.
+ */
+void
+fill_memcap(struct bt_stmt *bs, struct dtioc_probe_info *dtpi,
+    struct dtioc_req *dtrq)
+{
+	struct bt_arg *ba;
+	struct bt_cond *bc;
+
+	while (bs != NULL) {
+		SLIST_FOREACH(ba, &bs->bs_args, ba_next)
+			ba_fill_deref(ba, dtpi, dtrq);
+
+		switch (bs->bs_act) {
+		case B_AC_BUCKETIZE:
+		case B_AC_INSERT:
+			ba = (struct bt_arg *)bs->bs_var;
+			ba_fill_deref(ba, dtpi, dtrq);
+			break;
+		case B_AC_TEST:
+			bc = (struct bt_cond *)bs->bs_var;
+			fill_memcap(bc->bc_condbs, dtpi, dtrq);
+			fill_memcap(bc->bc_elsebs, dtpi, dtrq);
+			break;
+		default:
+			break;
+		}
+		bs = SLIST_NEXT(bs, bs_next);
+	}
+}
+
+/*
  * Returns non-zero if the program should halt.
  */
 int
@@ -1608,6 +1826,7 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AT_BI_GID:
 	case B_AT_BI_RETVAL:
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
+	case B_AT_FN_DEREF:
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		bv->bv_value = baeval(ba, dtev);
 		bv->bv_type = B_VT_LONG;
@@ -1780,6 +1999,7 @@ baeval(struct bt_arg *bval, struct dt_evt *dtev)
 	case B_AT_BI_GID:
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 	case B_AT_BI_RETVAL:
+	case B_AT_FN_DEREF:
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		ba = ba_new(ba2long(bval, dtev), B_AT_LONG);
 		break;
@@ -2088,6 +2308,13 @@ ba_name(struct bt_arg *ba)
 		return "probe";
 	case B_AT_FN_STR:
 		return "str";
+	case B_AT_FN_DEREF: {
+		static char buf[64];
+		struct bt_deref *bd = ba->ba_value;
+		snprintf(buf, sizeof(buf), "%s->%s",
+		    ba_name(bd->bd_base), bd->bd_field);
+		return buf;
+	}
 	case B_AT_OP_PLUS:
 		return "+";
 	case B_AT_OP_MINUS:
@@ -2223,6 +2450,12 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_BI_PROBE:
 		val = dtev->dtev_pbn;
 		break;
+	case B_AT_FN_DEREF: {
+		struct bt_deref *bd = ba->ba_value;
+		int argn = bd->bd_base->ba_type - B_AT_BI_ARG0;
+		val = (long)dtev->dtev_mem[argn];
+		break;
+	}
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		val = baexpr2long(ba, dtev);
 		break;
@@ -2373,6 +2606,13 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_FN_STR:
 		str = (const char*)(fn_str(ba, dtev, buf))->ba_value;
 		break;
+	case B_AT_FN_DEREF: {
+		struct bt_deref *bd = ba->ba_value;
+		int argn = bd->bd_base->ba_type - B_AT_BI_ARG0;
+		snprintf(buf, sizeof(buf), "%ld", (long)dtev->dtev_mem[argn]);
+		str = buf;
+		break;
+	}
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		snprintf(buf, sizeof(buf), "%ld", ba2long(ba, dtev));
 		str = buf;
@@ -2442,6 +2682,10 @@ ba2flags(struct bt_arg *ba)
 			flags |= DTEVT_FUNCARGS | DTEVT_STRARGS;
 		break;
 	}
+	case B_AT_FN_DEREF:
+		/* We need the arg's register value (pointer) to dereference. */
+		flags |= DTEVT_FUNCARGS;
+		break;
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		flags |= ba2dtflags(ba->ba_value);
 		break;

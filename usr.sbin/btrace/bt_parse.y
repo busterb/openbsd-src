@@ -117,7 +117,7 @@ static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 %}
 
 %token	<v.i>		ERROR ENDFILT
-%token	<v.i>		OP_EQ OP_NE OP_LE OP_LT OP_GE OP_GT OP_LAND OP_LOR OP_SHL OP_SHR
+%token	<v.i>		OP_EQ OP_NE OP_LE OP_LT OP_GE OP_GT OP_LAND OP_LOR OP_SHL OP_SHR OP_ARROW
 /* Builtins */
 %token	<v.i>		BUILTIN BEGIN ELSE END IF STR
 /* Functions and Map operators */
@@ -227,6 +227,7 @@ factor : '(' expr ')'		{ $$ = $2; }
 	| variable
 	| mentry
 	| func
+	| factor OP_ARROW STRING { $$ = bd_new($1, $3); }
 	;
 
 func	: STR '(' factor ')'		{ $$ = ba_new($3, B_AT_FN_STR); }
@@ -469,6 +470,28 @@ ba_new0(void *val, enum bt_argtype type)
 	ba->ba_type = type;
 
 	return ba;
+}
+
+/*
+ * Create a struct member dereference node: base->field.
+ * base must be an argN builtin; the offset and size are filled at setup
+ * time in btrace.c when CTF type information is resolved per-probe.
+ */
+struct bt_arg *
+bd_new(struct bt_arg *base, const char *field)
+{
+	struct bt_deref *bd;
+
+	if (base->ba_type < B_AT_BI_ARG0 || base->ba_type > B_AT_BI_ARG9)
+		yyerror("'->' can only be applied to argN");
+
+	bd = calloc(1, sizeof(*bd));
+	if (bd == NULL)
+		err(1, "bt_deref: calloc");
+	bd->bd_base = base;
+	bd->bd_field = field;
+
+	return ba_new(bd, B_AT_FN_DEREF);
 }
 
 /*
@@ -946,6 +969,12 @@ again:
 		if (peek() == '|') {
 			lgetc();
 			return OP_LOR;
+		}
+		return c;
+	case '-':
+		if (peek() == '>') {
+			lgetc();
+			return OP_ARROW;
 		}
 		return c;
 	case '/':
