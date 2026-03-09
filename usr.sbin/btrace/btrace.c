@@ -1594,6 +1594,8 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AT_BI_TID:
 	case B_AT_BI_CPU:
 	case B_AT_BI_NSECS:
+	case B_AT_BI_UID:
+	case B_AT_BI_GID:
 	case B_AT_BI_RETVAL:
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 	case B_AT_OP_PLUS ... B_AT_OP_LOR:
@@ -1763,6 +1765,8 @@ baeval(struct bt_arg *bval, struct dt_evt *dtev)
 	case B_AT_BI_TID:
 	case B_AT_BI_CPU:
 	case B_AT_BI_NSECS:
+	case B_AT_BI_UID:
+	case B_AT_BI_GID:
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 	case B_AT_BI_RETVAL:
 	case B_AT_OP_PLUS ... B_AT_OP_LOR:
@@ -2020,6 +2024,10 @@ ba_name(struct bt_arg *ba)
 		return "cpu";
 	case B_AT_BI_NSECS:
 		return "nsecs";
+	case B_AT_BI_UID:
+		return "uid";
+	case B_AT_BI_GID:
+		return "gid";
 	case B_AT_BI_KSTACK:
 		return "kstack";
 	case B_AT_BI_USTACK:
@@ -2159,6 +2167,12 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_BI_NSECS:
 		val = builtin_nsecs(dtev);
 		break;
+	case B_AT_BI_UID:
+		val = dtev->dtev_uid;
+		break;
+	case B_AT_BI_GID:
+		val = dtev->dtev_gid;
+		break;
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 		val = dtev->dtev_args[ba->ba_type - B_AT_BI_ARG0];
 		break;
@@ -2245,6 +2259,14 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		break;
 	case B_AT_BI_NSECS:
 		snprintf(buf, sizeof(buf), "%llu", builtin_nsecs(dtev));
+		str = buf;
+		break;
+	case B_AT_BI_UID:
+		snprintf(buf, sizeof(buf), "%u", dtev->dtev_uid);
+		str = buf;
+		break;
+	case B_AT_BI_GID:
+		snprintf(buf, sizeof(buf), "%u", dtev->dtev_gid);
 		str = buf;
 		break;
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
@@ -2352,6 +2374,8 @@ ba2flags(struct bt_arg *ba)
 	case B_AT_BI_PID:
 	case B_AT_BI_TID:
 	case B_AT_BI_NSECS:
+	case B_AT_BI_UID:
+	case B_AT_BI_GID:
 		break;
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 		flags |= DTEVT_FUNCARGS;

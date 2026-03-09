@@ -764,6 +764,7 @@ lookup(char *s)
 		{ "delete",	F_DELETE,	B_AC_DELETE },
 		{ "else",	ELSE,		0 },
 		{ "exit",	FUNC0,		B_AC_EXIT },
+		{ "gid",	BUILTIN,	B_AT_BI_GID },
 		{ "hist",	OP1,		0 },
 		{ "if",		IF,		0 },
 		{ "kstack",	BUILTIN,	B_AT_BI_KSTACK },
@@ -780,6 +781,7 @@ lookup(char *s)
 		{ "sum",	MOP1,		B_AT_MF_SUM },
 		{ "tid",	BUILTIN,	B_AT_BI_TID },
 		{ "time",	FUNC1,		B_AC_TIME },
+		{ "uid",	BUILTIN,	B_AT_BI_UID },
 		{ "ustack",	BUILTIN,	B_AT_BI_USTACK },
 		{ "zero",	MFUNC,		B_AC_ZERO },
 	};
