@@ -893,8 +893,9 @@ dt_pcb_ring_consume(struct dt_pcb *dp, struct dt_evt *dtev)
  * For each bit set in `strargs', copy the string pointed to by the
  * corresponding dtev_args[] entry into dtev_str[].  Called at probe fire
  * time; is_user selects copyinstr (user address space, e.g. syscall probes)
- * or copystr (kernel address space, e.g. kprobe probes).  Errors such as
- * bad pointers are silently ignored; the slot stays as the empty string.
+ * or kcopy (kernel address space, e.g. kprobe probes).  Both are
+ * fault-tolerant: bad pointers are silently ignored and the slot stays as
+ * the empty string.
  */
 void
 dt_copy_strargs(struct dt_evt *dtev, uint16_t strargs, size_t maxlen,
@@ -910,12 +911,16 @@ dt_copy_strargs(struct dt_evt *dtev, uint16_t strargs, size_t maxlen,
 			continue;
 		if (dtev->dtev_args[i] == 0)
 			continue;
-		if (is_user)
+		if (is_user) {
 			copyinstr((const void *)dtev->dtev_args[i],
 			    dtev->dtev_str[i], maxlen, NULL);
-		else
-			copystr((const void *)dtev->dtev_args[i],
-			    dtev->dtev_str[i], maxlen, NULL);
+		} else {
+			if (kcopy((const void *)dtev->dtev_args[i],
+			    dtev->dtev_str[i], maxlen) != 0)
+				dtev->dtev_str[i][0] = '\0';
+			else
+				dtev->dtev_str[i][maxlen - 1] = '\0';
+		}
 	}
 }
 
