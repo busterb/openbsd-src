@@ -450,7 +450,7 @@ dt_prov_bkpt_hook(struct trapframe *tf)
 
 			if (ISSET(dp->dp_evtflags, DTEVT_STRARGS))
 				dt_copy_strargs(dtev, dp->dp_strargs,
-				    dp->dp_strlen, 0);
+				    dp->dp_strlen);
 			dt_pcb_ring_consume(dp, dtev);
 		}
 		smr_read_leave();
