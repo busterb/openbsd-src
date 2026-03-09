@@ -856,6 +856,8 @@ dt_pcb_ring_get(struct dt_pcb *dp, int profiling)
 	dtev->dtev_cpu = cpu_number();
 	dtev->dtev_pid = p->p_p->ps_pid;
 	dtev->dtev_tid = p->p_tid + THREAD_PID_OFFSET;
+	dtev->dtev_uid = p->p_ucred->cr_uid;
+	dtev->dtev_gid = p->p_ucred->cr_gid;
 	nanotime(&dtev->dtev_tsp);
 
 	if (ISSET(dp->dp_evtflags, DTEVT_EXECNAME))
