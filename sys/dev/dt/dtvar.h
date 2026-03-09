@@ -204,7 +204,7 @@ void		 dt_pcb_purge(struct dt_pcb_list *);
 void		 dt_pcb_ring_skiptick(struct dt_pcb *, unsigned int);
 struct dt_evt	*dt_pcb_ring_get(struct dt_pcb *, int);
 void		 dt_pcb_ring_consume(struct dt_pcb *, struct dt_evt *);
-void		 dt_copy_strargs(struct dt_evt *, uint16_t, size_t, int);
+void		 dt_copy_strargs(struct dt_evt *, uint16_t, size_t);
 
 /*
  * Probes are entry points in the system where events can be recorded.

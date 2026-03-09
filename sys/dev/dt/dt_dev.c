@@ -898,8 +898,7 @@ dt_pcb_ring_consume(struct dt_pcb *dp, struct dt_evt *dtev)
  * the empty string.
  */
 void
-dt_copy_strargs(struct dt_evt *dtev, uint16_t strargs, size_t maxlen,
-    int is_user)
+dt_copy_strargs(struct dt_evt *dtev, uint16_t strargs, size_t maxlen)
 {
 	int i;
 
@@ -907,15 +906,17 @@ dt_copy_strargs(struct dt_evt *dtev, uint16_t strargs, size_t maxlen,
 		maxlen = DT_STRLEN;
 
 	for (i = 0; i < DTMAXFUNCARGS; i++) {
+		vaddr_t addr = dtev->dtev_args[i];
+
 		if (!(strargs & (1u << i)))
 			continue;
-		if (dtev->dtev_args[i] == 0)
+		if (addr == 0)
 			continue;
-		if (is_user) {
-			copyinstr((const void *)dtev->dtev_args[i],
+		if (addr < VM_MAXUSER_ADDRESS) {
+			copyinstr((const void *)addr,
 			    dtev->dtev_str[i], maxlen, NULL);
 		} else {
-			if (kcopy((const void *)dtev->dtev_args[i],
+			if (kcopy((const void *)addr,
 			    dtev->dtev_str[i], maxlen) != 0)
 				dtev->dtev_str[i][0] = '\0';
 			else
