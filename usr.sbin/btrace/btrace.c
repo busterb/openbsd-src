@@ -623,7 +623,7 @@ ba2strargs(struct bt_arg *ba)
 			if (ba->ba_value != NULL)
 				mask |= ba2strargs(ba->ba_value);
 			break;
-		case B_AT_OP_PLUS ... B_AT_OP_LOR:
+		case B_AT_OP_PLUS ... B_AT_OP_SHR:
 			if (ba->ba_value != NULL)
 				mask |= ba2strargs(ba->ba_value);
 			break;
@@ -713,7 +713,7 @@ ba_strlen(struct bt_arg *ba)
 					maxlen = l;
 			}
 			break;
-		case B_AT_OP_PLUS ... B_AT_OP_LOR:
+		case B_AT_OP_PLUS ... B_AT_OP_SHR:
 			if (ba->ba_value != NULL) {
 				l = ba_strlen((struct bt_arg *)ba->ba_value);
 				if (l > maxlen)
@@ -1596,7 +1596,7 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AT_BI_NSECS:
 	case B_AT_BI_RETVAL:
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
-	case B_AT_OP_PLUS ... B_AT_OP_LOR:
+	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		bv->bv_value = baeval(ba, dtev);
 		bv->bv_type = B_VT_LONG;
 		break;
@@ -1765,7 +1765,7 @@ baeval(struct bt_arg *bval, struct dt_evt *dtev)
 	case B_AT_BI_NSECS:
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 	case B_AT_BI_RETVAL:
-	case B_AT_OP_PLUS ... B_AT_OP_LOR:
+	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		ba = ba_new(ba2long(bval, dtev), B_AT_LONG);
 		break;
 	case B_AT_STR:
@@ -1983,6 +1983,21 @@ baexpr2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_OP_LOR:
 		result = (lval || rval);
 		break;
+	case B_AT_OP_LNOT:
+		result = !lval;
+		break;
+	case B_AT_OP_BNOT:
+		result = ~lval;
+		break;
+	case B_AT_OP_NEG:
+		result = -lval;
+		break;
+	case B_AT_OP_SHL:
+		result = lval << rval;
+		break;
+	case B_AT_OP_SHR:
+		result = (long)((unsigned long)lval >> rval);
+		break;
 	default:
 		xabort("unsupported operation %d", ba->ba_type);
 	}
@@ -2084,6 +2099,16 @@ ba_name(struct bt_arg *ba)
 		return "&&";
 	case B_AT_OP_LOR:
 		return "||";
+	case B_AT_OP_LNOT:
+		return "!";
+	case B_AT_OP_BNOT:
+		return "~";
+	case B_AT_OP_NEG:
+		return "-";
+	case B_AT_OP_SHL:
+		return "<<";
+	case B_AT_OP_SHR:
+		return ">>";
 	default:
 		xabort("unsupported type %d", ba->ba_type);
 	}
@@ -2168,7 +2193,7 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_BI_PROBE:
 		val = dtev->dtev_pbn;
 		break;
-	case B_AT_OP_PLUS ... B_AT_OP_LOR:
+	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		val = baexpr2long(ba, dtev);
 		break;
 	default:
@@ -2306,7 +2331,7 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_FN_STR:
 		str = (const char*)(fn_str(ba, dtev, buf))->ba_value;
 		break;
-	case B_AT_OP_PLUS ... B_AT_OP_LOR:
+	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		snprintf(buf, sizeof(buf), "%ld", ba2long(ba, dtev));
 		str = buf;
 		break;
@@ -2372,7 +2397,7 @@ ba2flags(struct bt_arg *ba)
 			flags |= DTEVT_FUNCARGS | DTEVT_STRARGS;
 		break;
 	}
-	case B_AT_OP_PLUS ... B_AT_OP_LOR:
+	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		flags |= ba2dtflags(ba->ba_value);
 		break;
 	default:
@@ -2500,7 +2525,7 @@ debug_dump_term(struct bt_arg *ba)
 	case B_AT_LONG:
 		debugx("%s", ba2str(ba, NULL));
 		break;
-	case B_AT_OP_PLUS ... B_AT_OP_LOR:
+	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		debug_dump_expr(ba);
 		break;
 	default:
