@@ -155,7 +155,7 @@ dt_prov_syscall_entry(struct dt_provider *dtpv, ...)
 		if (ISSET(dp->dp_evtflags, DTEVT_FUNCARGS))
 			memcpy(dtev->dtev_args, args, argsize);
 		if (ISSET(dp->dp_evtflags, DTEVT_STRARGS))
-			dt_copy_strargs(dtev, dp->dp_strargs, dp->dp_strlen, 1);
+			dt_copy_strargs(dtev, dp->dp_strargs, dp->dp_strlen);
 
 		dt_pcb_ring_consume(dp, dtev);
 	}

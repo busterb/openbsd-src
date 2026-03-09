@@ -242,11 +242,13 @@ When
 is a probe argument
 .Pq Va arg0 No through Va arg9 ,
 return the NUL-terminated string it points to.
-The string is copied at probe fire time: from user address space for
-.Cm syscall
-probes, and from kernel address space for
-.Cm kprobe
-probes.
+The string is copied at probe fire time.
+The copy direction is determined automatically: addresses below
+.Dv VM_MAXUSER_ADDRESS
+are copied from user address space using
+.Xr copyinstr 9 ;
+kernel addresses are copied using
+.Xr kcopy 9 .
 For any other expression,
 .Va expr
 is converted to a string representation at display time.
