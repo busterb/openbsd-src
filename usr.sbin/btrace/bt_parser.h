@@ -157,6 +157,7 @@ struct bt_arg {
 		B_AT_BI_PROBE,
 
 		B_AT_FN_STR,			/* str(arg0); str($1, 3); */
+		B_AT_FN_DEREF,			/* arg0->field: struct member deref */
 
 		B_AT_MF_COUNT,			/* @map[key] = count() */
 		B_AT_MF_MAX,			/* @map[key] = max(nsecs) */
@@ -189,6 +190,20 @@ struct bt_arg {
 };
 
 #define BA_INITIALIZER(v, t)	{ { NULL }, (void *)(v), NULL, (t) }
+
+/*
+ * Struct member dereference node: arg0->field.
+ *
+ * bd_base points to the argN node being dereferenced.
+ * bd_field names the struct member.
+ * bd_offset and bd_size are filled at setup time via CTF lookup.
+ */
+struct bt_deref {
+	struct bt_arg		*bd_base;	/* argN node (B_AT_BI_ARGx) */
+	const char		*bd_field;	/* field name */
+	uint32_t		 bd_offset;	/* byte offset (set at setup) */
+	uint16_t		 bd_size;	/* field size in bytes (set at setup) */
+};
 
 /*
  * Represents branches of an if-else statement.
@@ -233,6 +248,7 @@ int			 btparse(const char *, size_t, const char *, int);
 
 #define ba_new(v, t)	 ba_new0((void *)(v), (t))
 struct bt_arg		*ba_new0(void *, enum bt_argtype);
+struct bt_arg		*bd_new(struct bt_arg *, const char *);
 
 const char		*bv_name(struct bt_var *);
 

@@ -261,6 +261,24 @@ is converted to a string representation at display time.
 The result is truncated to
 .Va maxlen
 bytes (up to 1024, the default), including the NUL-terminator.
+.It Ar argN Ic -> Ar field
+Dereference a struct member from a probe argument.
+.Ar argN
+must be a pointer to a struct or union.
+.Ar field
+names the member to capture.
+The field value is read from kernel memory at probe fire time and stored
+as a 64-bit integer.
+Type information from CTF data in
+.Pa /bsd
+is used to determine the field offset and size.
+If CTF data is unavailable or the field cannot be resolved, the value
+is 0.
+Currently only applies to
+.Cm kprobe
+and
+.Cm syscall
+probes.
 .It Fn time timefmt
 Print timestamps using
 .Xr strftime 3 .

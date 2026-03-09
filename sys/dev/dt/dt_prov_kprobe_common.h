@@ -29,7 +29,7 @@
 #define KPROBE_ENTRY	0x1
 #define KPROBE_RETURN	0x2
 
-#define DTEVT_PROV_KPROBE (DTEVT_COMMON|DTEVT_FUNCARGS|DTEVT_STRARGS)
+#define DTEVT_PROV_KPROBE (DTEVT_COMMON|DTEVT_FUNCARGS|DTEVT_STRARGS|DTEVT_MEMARGS)
 
 /* Bob Jenkin's public domain 32-bit integer hashing function.
  * Original at https://burtleburtle.net/bob/hash/integer.html.

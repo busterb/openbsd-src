@@ -299,6 +299,8 @@ dt_prov_kprobe_alloc(struct dt_probe *dtp, struct dt_softc *sc,
 	dp->dp_evtflags = dtrq->dtrq_evtflags & DTEVT_PROV_KPROBE;
 	dp->dp_strargs = dtrq->dtrq_strargs;
 	dp->dp_strlen = dtrq->dtrq_strlen;
+	dp->dp_memargs = dtrq->dtrq_memargs;
+	memcpy(dp->dp_memcap, dtrq->dtrq_memcap, sizeof(dp->dp_memcap));
 	TAILQ_INSERT_HEAD(plist, dp, dp_snext);
 	return 0;
 }
@@ -369,6 +371,9 @@ dt_prov_bkpt_hook(struct trapframe *tf)
 			if (ISSET(dp->dp_evtflags, DTEVT_STRARGS))
 				dt_copy_strargs(dtev, dp->dp_strargs,
 				    dp->dp_strlen);
+			if (ISSET(dp->dp_evtflags, DTEVT_MEMARGS))
+				dt_copy_memargs(dtev, dp->dp_memargs,
+				    dp->dp_memcap);
 			dt_pcb_ring_consume(dp, dtev);
 		}
 		smr_read_leave();
