@@ -929,6 +929,35 @@ dt_copy_strargs(struct dt_evt *dtev, uint16_t strargs, size_t maxlen)
 }
 
 /*
+ * For each bit set in `memargs', copy dtrmc_size bytes from
+ * dtev_args[i] + dtrmc_offset into dtev_mem[i].  Called at probe fire time.
+ * kcopy() is used for fault-tolerant kernel address access; on fault the
+ * slot is left as zero.
+ */
+void
+dt_copy_memargs(struct dt_evt *dtev, uint16_t memargs,
+    const struct dtrq_memcap *memcap)
+{
+	int i;
+
+	for (i = 0; i < DTMAXFUNCARGS; i++) {
+		uint16_t size;
+		vaddr_t addr;
+
+		if (!(memargs & (1u << i)))
+			continue;
+		if (dtev->dtev_args[i] == 0)
+			continue;
+		size = memcap[i].dtrmc_size;
+		if (size == 0 || size > sizeof(dtev->dtev_mem[i]))
+			continue;
+		addr = dtev->dtev_args[i] + memcap[i].dtrmc_offset;
+		dtev->dtev_mem[i] = 0;
+		kcopy((const void *)addr, &dtev->dtev_mem[i], size);
+	}
+}
+
+/*
  * Copy at most `max' events from `dc', producing the same amount
  * of free slots.
  */

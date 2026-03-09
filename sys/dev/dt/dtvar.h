@@ -74,6 +74,7 @@ struct dt_evt {
 #define dtev_retval	_args.E_return.__retval	/* function retval */
 #define dtev_error	_args.E_return.__error	/* function error */
 	char			dtev_str[DTMAXFUNCARGS][DT_STRLEN]; /* str() arg captures */
+	uint64_t		dtev_mem[DTMAXFUNCARGS]; /* struct member captures */
 };
 
 /*
@@ -84,6 +85,7 @@ struct dt_evt {
 #define DTEVT_KSTACK	(1 << 2)		/* kernel stack */
 #define DTEVT_FUNCARGS	(1 << 3)		/* function arguments */
 #define DTEVT_STRARGS	(1 << 4)		/* string arguments */
+#define DTEVT_MEMARGS	(1 << 5)		/* struct member capture */
 
 #define	DTEVT_FLAG_BITS		\
 	"\020"			\
@@ -92,6 +94,7 @@ struct dt_evt {
 	"\003KSTACK"		\
 	"\004FUNCARGS"		\
 	"\005STRARGS"		\
+	"\006MEMARGS"		\
 
 struct dtioc_probe_info {
 	uint32_t	dtpi_pbn;		/* probe number */
@@ -118,12 +121,25 @@ struct dtioc_arg {
 	struct dtioc_arg_info	*dtar_args;	/* array of arg info */
 };
 
+/*
+ * Per-argument struct member capture spec: byte offset and size to copy
+ * at probe fire time when DTEVT_MEMARGS is set.
+ */
+struct dtrq_memcap {
+	uint32_t		 dtrmc_offset;	/* byte offset into struct */
+	uint16_t		 dtrmc_size;	/* bytes to copy (1, 2, 4, or 8) */
+	uint16_t		 _pad;
+};
+
 struct dtioc_req {
 	uint32_t		 dtrq_pbn;	/* probe number */
 	uint16_t		 dtrq_strargs;	/* bitmask: which args are strings */
 	uint16_t		 dtrq_strlen;	/* max bytes per str() arg capture */
 	uint64_t		 dtrq_evtflags;	/* states to record */
 	uint64_t		 dtrq_nsecs;	/* execution period */
+	uint16_t		 dtrq_memargs;	/* bitmask: which args need mem capture */
+	uint16_t		 _pad[3];
+	struct dtrq_memcap	 dtrq_memcap[DTMAXFUNCARGS]; /* per-arg capture specs */
 };
 
 struct dtioc_stat {
@@ -190,6 +206,8 @@ struct dt_pcb {
 	uint64_t		 dp_evtflags;	/* [I] event states to record */
 	uint16_t		 dp_strargs;	/* [I] bitmask of str() args */
 	uint16_t		 dp_strlen;	/* [I] max bytes per str() arg capture */
+	uint16_t		 dp_memargs;	/* [I] bitmask of mem-capture args */
+	struct dtrq_memcap	 dp_memcap[DTMAXFUNCARGS]; /* [I] per-arg capture specs */
 
 	/* Provider specific fields. */
 	struct clockintr	 dp_clockintr;	/* [D] profiling handle */
@@ -207,6 +225,8 @@ void		 dt_pcb_ring_skiptick(struct dt_pcb *, unsigned int);
 struct dt_evt	*dt_pcb_ring_get(struct dt_pcb *, int);
 void		 dt_pcb_ring_consume(struct dt_pcb *, struct dt_evt *);
 void		 dt_copy_strargs(struct dt_evt *, uint16_t, size_t);
+void		 dt_copy_memargs(struct dt_evt *, uint16_t,
+		     const struct dtrq_memcap *);
 
 /*
  * Probes are entry points in the system where events can be recorded.
