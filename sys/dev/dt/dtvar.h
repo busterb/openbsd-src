@@ -53,6 +53,8 @@ struct dt_evt {
 	unsigned int		dtev_cpu;	/* CPU id */
 	pid_t			dtev_pid;	/* ID of current process */
 	pid_t			dtev_tid;	/* ID of current thread */
+	uid_t			dtev_uid;	/* UID of current process */
+	gid_t			dtev_gid;	/* GID of current process */
 	struct timespec		dtev_tsp;	/* timestamp (nsecs) */
 
 	/*

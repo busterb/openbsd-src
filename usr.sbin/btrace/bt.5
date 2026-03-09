@@ -164,6 +164,8 @@ Command name of the current process.
 ID of the processor that recorded the event.
 .It Va elapsed
 Nanoseconds elapsed since tracing began.
+.It Va gid
+Group ID of the current process.
 .It Va kstack
 Kernel stack of the current thread.
 .It Va nsecs
@@ -178,6 +180,8 @@ Return value of the traced syscall or
 return probe.
 .It Va tid
 Thread ID of the current thread.
+.It Va uid
+User ID of the current process.
 .It Va ustack
 Userland stack of the current thread.
 .El
