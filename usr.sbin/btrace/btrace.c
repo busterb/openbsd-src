@@ -1462,7 +1462,9 @@ stmt_test(struct bt_stmt *bs, struct dt_evt *dtev)
 
 	ba = SLIST_FIRST(&bs->bs_args);
 
-	return baexpr2long(ba, dtev) != 0;
+	if (ba->ba_type >= B_AT_OP_PLUS)
+		return baexpr2long(ba, dtev) != 0;
+	return ba2long(ba, dtev) != 0;
 }
 
 /*
