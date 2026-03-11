@@ -592,8 +592,10 @@ rules_action_scan(struct bt_stmt *bs)
 			break;
 		case B_AC_TEST:
 			bc = (struct bt_cond *)bs->bs_var;
-			evtflags |= rules_action_scan(bc->bc_condbs);
-			evtflags |= rules_action_scan(bc->bc_elsebs);
+			if (bc != NULL) {
+				evtflags |= rules_action_scan(bc->bc_condbs);
+				evtflags |= rules_action_scan(bc->bc_elsebs);
+			}
 			break;
 		default:
 			break;
@@ -663,8 +665,10 @@ rules_strargs_scan(struct bt_stmt *bs)
 			break;
 		case B_AC_TEST:
 			bc = (struct bt_cond *)bs->bs_var;
-			mask |= rules_strargs_scan(bc->bc_condbs);
-			mask |= rules_strargs_scan(bc->bc_elsebs);
+			if (bc != NULL) {
+				mask |= rules_strargs_scan(bc->bc_condbs);
+				mask |= rules_strargs_scan(bc->bc_elsebs);
+			}
 			break;
 		default:
 			break;
@@ -761,12 +765,14 @@ rules_strlen_scan(struct bt_stmt *bs)
 			break;
 		case B_AC_TEST:
 			bc = (struct bt_cond *)bs->bs_var;
-			l = rules_strlen_scan(bc->bc_condbs);
-			if (l > maxlen)
-				maxlen = l;
-			l = rules_strlen_scan(bc->bc_elsebs);
-			if (l > maxlen)
-				maxlen = l;
+			if (bc != NULL) {
+				l = rules_strlen_scan(bc->bc_condbs);
+				if (l > maxlen)
+					maxlen = l;
+				l = rules_strlen_scan(bc->bc_elsebs);
+				if (l > maxlen)
+					maxlen = l;
+			}
 			break;
 		default:
 			break;
@@ -1493,8 +1499,10 @@ fill_memcap(struct bt_stmt *bs, struct dtioc_probe_info *dtpi,
 			break;
 		case B_AC_TEST:
 			bc = (struct bt_cond *)bs->bs_var;
-			fill_memcap(bc->bc_condbs, dtpi, dtrq);
-			fill_memcap(bc->bc_elsebs, dtpi, dtrq);
+			if (bc != NULL) {
+				fill_memcap(bc->bc_condbs, dtpi, dtrq);
+				fill_memcap(bc->bc_elsebs, dtpi, dtrq);
+			}
 			break;
 		default:
 			break;
