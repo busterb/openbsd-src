@@ -84,6 +84,7 @@ struct bt_stmt	*bm_insert(const char *, struct bt_arg *, struct bt_arg *);
 struct bt_stmt	*bm_op(enum bt_action, struct bt_arg *, struct bt_arg *);
 
 struct bt_stmt	*bh_inc(const char *, struct bt_arg *, struct bt_arg *);
+struct bt_stmt	*bhm_inc(const char *, struct bt_arg *, struct bt_arg *, struct bt_arg *);
 
 /*
  * Lexer
@@ -258,6 +259,8 @@ stmt	: ';' NL			{ $$ = NULL; }
 	| F_PRINT '(' pargs ')'		{ $$ = bs_new($1, $3, NULL); }
 	| GVAR '=' OP1 '(' expr ')'	{ $$ = bh_inc($1, $5, NULL); }
 	| GVAR '=' OP4 '(' expr ',' vargs ')'	{ $$ = bh_inc($1, $5, $7); }
+	| GVAR '[' vargs ']' '=' OP1 '(' expr ')'		{ $$ = bhm_inc($1, $3, $8, NULL); }
+	| GVAR '[' vargs ']' '=' OP4 '(' expr ',' vargs ')'	{ $$ = bhm_inc($1, $3, $8, $10); }
 	;
 
 stmtblck: IF '(' expr ')' block			{ $$ = bt_new($3, $5, NULL); }
@@ -760,6 +763,56 @@ bh_inc(const char *hname, struct bt_arg *hval, struct bt_arg *hrange)
 	ba = ba_new(bg_get(hname), B_AT_HIST);
 	ba->ba_key = hrange;
 	return bs_new(B_AC_BUCKETIZE, ba, (struct bt_var *)hval);
+}
+
+/*
+ * Keyed histogram: @map[key] = hist(val) or @map[key] = lhist(val, min, max, step)
+ */
+struct bt_stmt *
+bhm_inc(const char *mname, struct bt_arg *mkey, struct bt_arg *hval,
+    struct bt_arg *hrange)
+{
+	struct bt_arg *bmap, *bhist;
+	struct bt_stmt *bs;
+
+	if (hrange != NULL) {
+		struct bt_arg *ba;
+		long min = 0, max;
+		int count = 0;
+
+		for (ba = hrange; ba != NULL; ba = SLIST_NEXT(ba, ba_next)) {
+			if (++count > 3)
+				yyerror("too many arguments");
+			if (ba->ba_type != B_AT_LONG)
+				yyerror("type invalid");
+			switch (count) {
+			case 1:
+				min = (long)ba->ba_value;
+				if (min >= 0)
+					break;
+				yyerror("negative minimum");
+			case 2:
+				max = (long)ba->ba_value;
+				if (max > min)
+					break;
+				yyerror("maximum smaller than minimum (%d < %d)",
+				    max, min);
+			case 3:
+				break;
+			default:
+				assert(0);
+			}
+		}
+		if (count < 3)
+			yyerror("%d missing arguments", 3 - count);
+	}
+
+	bmap = bm_find(mname, mkey);
+	bhist = ba_new(NULL, B_AT_HIST);	/* sentinel: ba_value=NULL, ba_key=range */
+	bhist->ba_key = hrange;
+	bs = bs_new(B_AC_MAPHIST, bmap, (struct bt_var *)hval);
+	ba_append(bmap, bhist);
+	return bs;
 }
 
 struct keyword {
