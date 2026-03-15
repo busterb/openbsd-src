@@ -86,6 +86,7 @@ struct bt_stmt	*bm_op(enum bt_action, struct bt_arg *, struct bt_arg *);
 struct bt_stmt	*bh_inc(const char *, struct bt_arg *, struct bt_arg *);
 struct bt_stmt	*bhm_inc(const char *, struct bt_arg *, struct bt_arg *, struct bt_arg *);
 struct bt_stmt	*bfor_new(const char *, const char *, struct bt_stmt *);
+struct bt_stmt	*bwhile_new(struct bt_arg *, struct bt_stmt *);
 
 /*
  * Lexer
@@ -118,10 +119,17 @@ static int 	 pflag = 0;		/* probe parsing context flag */
 static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 %}
 
+/*
+ * 2 shift/reduce conflicts on GVAR '[': shift wins, choosing
+ * mentry : GVAR '[' vargs ']' over variable : GVAR -> factor '[' NUMBER ']'.
+ * This is correct: @map[key] is always a map access, not a subscript.
+ */
+%expect 2
+
 %token	<v.i>		ERROR ENDFILT
 %token	<v.i>		OP_EQ OP_NE OP_LE OP_LT OP_GE OP_GT OP_LAND OP_LOR OP_SHL OP_SHR OP_ARROW
 /* Builtins */
-%token	<v.i>		BUILTIN BEGIN ELSE END FOR IF STR
+%token	<v.i>		BUILTIN BEGIN ELSE END FOR IF STR WHILE
 /* Functions and Map operators */
 %token  <v.i>		F_DELETE F_PRINT
 %token	<v.i>		MFUNC FUNC0 FUNC1 FUNCN OP1 OP2 OP4 MOP0 MOP1
@@ -230,6 +238,7 @@ factor : '(' expr ')'		{ $$ = $2; }
 	| mentry
 	| func
 	| factor OP_ARROW STRING { $$ = bd_new($1, $3); }
+	| factor '[' NUMBER ']'	{ $$ = bsub_new($1, $3); }
 	;
 
 func	: STR '(' factor ')'		{ $$ = ba_new($3, B_AT_FN_STR); }
@@ -268,6 +277,7 @@ stmtblck: IF '(' expr ')' block			{ $$ = bt_new($3, $5, NULL); }
 	| IF '(' expr ')' block ELSE block	{ $$ = bt_new($3, $5, $7); }
 	| IF '(' expr ')' block ELSE stmtblck	{ $$ = bt_new($3, $5, $7); }
 	| FOR '(' LVAR ':' GVAR ')' block	{ $$ = bfor_new($3, $5, $7); }
+	| WHILE '(' expr ')' block		{ $$ = bwhile_new($3, $5); }
 	;
 
 stmtlist: stmtlist stmtblck		{ $$ = bs_append($1, $2); }
@@ -489,8 +499,10 @@ bd_new(struct bt_arg *base, const char *field)
 	struct bt_deref *bd;
 
 	if (base->ba_type != B_AT_FN_DEREF &&
+	    base->ba_type != B_AT_FN_SUBSCRIPT &&
 	    (base->ba_type < B_AT_BI_ARG0 || base->ba_type > B_AT_BI_ARG9))
-		yyerror("'->' can only be applied to argN or argN->field");
+		yyerror("'->' can only be applied to argN, argN[N], or "
+		    "argN->field");
 
 	bd = calloc(1, sizeof(*bd));
 	if (bd == NULL)
@@ -849,6 +861,54 @@ bfor_new(const char *varname, const char *mapname, struct bt_stmt *body)
 	return bs_new(B_AC_FORMAP, mapref, (struct bt_var *)bfor);
 }
 
+/*
+ * Array subscript node: base[index]
+ * base must be an argN builtin, a B_AT_FN_DEREF, or a B_AT_FN_SUBSCRIPT.
+ * index must be a non-negative constant integer.
+ * The element stride and capture slot are filled at setup time in btrace.c.
+ */
+struct bt_arg *
+bsub_new(struct bt_arg *base, long index)
+{
+	struct bt_subscript *bss;
+
+	if (base->ba_type != B_AT_FN_DEREF &&
+	    base->ba_type != B_AT_FN_SUBSCRIPT &&
+	    (base->ba_type < B_AT_BI_ARG0 || base->ba_type > B_AT_BI_ARG9))
+		yyerror("'[]' can only be applied to argN, argN[N], or "
+		    "argN->field");
+	if (index < 0)
+		yyerror("subscript index must be non-negative");
+
+	bss = calloc(1, sizeof(*bss));
+	if (bss == NULL)
+		err(1, "bt_subscript: calloc");
+	bss->bss_base = base;
+	bss->bss_index = index;
+	bss->bss_slot = BSS_SLOT_UNSET;
+
+	return ba_new(bss, B_AT_FN_SUBSCRIPT);
+}
+
+/*
+ * While-loop: while (expr) { body }
+ */
+struct bt_stmt *
+bwhile_new(struct bt_arg *cond, struct bt_stmt *body)
+{
+	struct bt_arg *bop;
+	struct bt_while *bwh;
+
+	bop = ba_op(B_AT_OP_NE, NULL, cond);
+
+	bwh = calloc(1, sizeof(*bwh));
+	if (bwh == NULL)
+		err(1, "bwhile: calloc");
+	bwh->bwh_body = body;
+
+	return bs_new(B_AC_WHILE, bop, (struct bt_var *)bwh);
+}
+
 struct keyword {
 	const char	*word;
 	int		 token;
@@ -907,6 +967,7 @@ lookup(char *s)
 		{ "time",	FUNC1,		B_AC_TIME },
 		{ "uid",	BUILTIN,	B_AT_BI_UID },
 		{ "ustack",	BUILTIN,	B_AT_BI_USTACK },
+		{ "while",	WHILE,		0 },
 		{ "zero",	MFUNC,		B_AC_ZERO },
 	};
 

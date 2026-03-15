@@ -289,6 +289,16 @@ first captures the pointer stored in
 then reads
 .Ar field2
 from the struct it points to.
+Subscript expressions may also appear as the base of
+.Ic -> :
+.Ar argN Ic \&[ Ar N Ic \&] Ic -> Ar field
+reads element
+.Ar N
+of the array that
+.Ar argN
+points to and then captures
+.Ar field
+from that element.
 Up to
 .Dv DTMAXMEMCAPS
 field captures may be active per probe across all dereference expressions.
@@ -297,6 +307,27 @@ Type information from CTF data in
 is used to determine field offsets and sizes.
 If CTF data is unavailable or a field cannot be resolved, the value
 is 0.
+Currently only applies to
+.Cm kprobe
+and
+.Cm syscall
+probes.
+.It Ar argN Ic \&[ Ar N Ic \&]
+Read element
+.Ar N
+(a non-negative integer constant) from the array pointed to by
+.Ar argN .
+The element is read from kernel memory at probe fire time and stored as a
+64-bit integer.
+Type information from CTF data in
+.Pa /bsd
+is used to determine the element size (stride).
+If CTF data is unavailable or the type is not a pointer, the value is 0.
+Subscripts may be chained
+.Pq Ar argN Ic \&[ Ar N Ic \&] Ic \&[ Ar M Ic \&]
+and combined with
+.Ic ->
+in either order.
 Currently only applies to
 .Cm kprobe
 and
@@ -331,6 +362,16 @@ is the aggregated value.
 Only maps with scalar aggregation values
 .Pq count , sum , min , max , avg , stats
 may be iterated.
+.It Ic while Pq Ar expr No block
+Execute
+.Ar block
+repeatedly as long as
+.Ar expr
+is non-zero.
+Evaluation is capped at 1024 iterations per event to prevent runaway
+loops from stalling the
+.Xr btrace 8
+process.
 .It "@map[key]" = Fn avg "value"
 Store the running average of all recorded values for
 .Va key .
