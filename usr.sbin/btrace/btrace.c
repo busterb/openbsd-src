@@ -114,7 +114,10 @@ static int		 ctf_deref_field(uint16_t, const char *,
 			     uint32_t *, uint16_t *, uint16_t *);
 int			 ctf_resolve_deref(const char *, int, const char *,
 			     uint32_t *, uint16_t *, uint16_t *);
+static int		 ctf_subscript_stride(uint16_t, uint16_t *, uint32_t *);
 static int		 fill_deref_node(struct bt_deref *,
+			     struct dtioc_probe_info *, struct dtioc_req *);
+static int		 fill_subscript_node(struct bt_subscript *,
 			     struct dtioc_probe_info *, struct dtioc_req *);
 void			 ba_fill_deref(struct bt_arg *, struct dtioc_probe_info *,
 			     struct dtioc_req *);
@@ -626,6 +629,12 @@ rules_action_scan(struct bt_stmt *bs)
 				evtflags |= rules_action_scan(bfor->bfor_body);
 			break;
 		}
+		case B_AC_WHILE: {
+			struct bt_while *bwh = (struct bt_while *)bs->bs_var;
+			if (bwh != NULL)
+				evtflags |= rules_action_scan(bwh->bwh_body);
+			break;
+		}
 		default:
 			break;
 		}
@@ -704,6 +713,12 @@ rules_strargs_scan(struct bt_stmt *bs)
 			struct bt_for *bfor = (struct bt_for *)bs->bs_var;
 			if (bfor != NULL)
 				mask |= rules_strargs_scan(bfor->bfor_body);
+			break;
+		}
+		case B_AC_WHILE: {
+			struct bt_while *bwh = (struct bt_while *)bs->bs_var;
+			if (bwh != NULL)
+				mask |= rules_strargs_scan(bwh->bwh_body);
 			break;
 		}
 		default:
@@ -815,6 +830,15 @@ rules_strlen_scan(struct bt_stmt *bs)
 			struct bt_for *bfor = (struct bt_for *)bs->bs_var;
 			if (bfor != NULL) {
 				l = rules_strlen_scan(bfor->bfor_body);
+				if (l > maxlen)
+					maxlen = l;
+			}
+			break;
+		}
+		case B_AC_WHILE: {
+			struct bt_while *bwh = (struct bt_while *)bs->bs_var;
+			if (bwh != NULL) {
+				l = rules_strlen_scan(bwh->bwh_body);
 				if (l > maxlen)
 					maxlen = l;
 			}
@@ -1544,6 +1568,27 @@ fill_deref_node(struct bt_deref *bd, struct dtioc_probe_info *dtpi,
 		dtrq->dtrq_memcap[slot].dtrmc_flags = DTMC_FL_MEMBASE;
 		dtrq->dtrq_memcap[slot].dtrmc_offset = (int32_t)offset;
 		dtrq->dtrq_memcap[slot].dtrmc_size = size;
+	} else if (bd->bd_base->ba_type == B_AT_FN_SUBSCRIPT) {
+		/* Base is a subscript: use its element typeid. */
+		struct bt_subscript *bss_inner = bd->bd_base->ba_value;
+		int inner_slot;
+
+		inner_slot = fill_subscript_node(bss_inner, dtpi, dtrq);
+		if (inner_slot < 0 || bss_inner->bss_typeid == 0)
+			return -1;
+		if (ctf_deref_field(bss_inner->bss_typeid, bd->bd_field,
+		    &offset, &size, &bd->bd_typeid) != 0) {
+			if (verbose)
+				warnx("cannot resolve '%s->%s' for probe %s",
+				    ba_name(bd->bd_base), bd->bd_field,
+				    dtpi->dtpi_func);
+			return -1;
+		}
+		slot = dtrq->dtrq_nmemcap++;
+		dtrq->dtrq_memcap[slot].dtrmc_argn = (uint8_t)inner_slot;
+		dtrq->dtrq_memcap[slot].dtrmc_flags = DTMC_FL_MEMBASE;
+		dtrq->dtrq_memcap[slot].dtrmc_offset = (int32_t)offset;
+		dtrq->dtrq_memcap[slot].dtrmc_size = size;
 	} else {
 		/* Direct: base is an argN builtin. */
 		int argn = bd->bd_base->ba_type - B_AT_BI_ARG0;
@@ -1571,6 +1616,154 @@ fill_deref_node(struct bt_deref *bd, struct dtioc_probe_info *dtpi,
 }
 
 /*
+ * Using CTF, resolve the element type and stride of a pointer type.
+ * ptr_typeid must resolve to CTF_K_POINTER after qualifier stripping.
+ * Sets *elem_typeidp to the pointed-to type ID and *stridep to its size.
+ * Returns 0 on success, -1 if CTF is unavailable or type is not a pointer.
+ */
+static int
+ctf_subscript_stride(uint16_t ptr_typeid, uint16_t *elem_typeidp,
+    uint32_t *stridep)
+{
+	uint16_t typeid = ptr_typeid, kind, ref;
+	ssize_t sz;
+	int depth;
+
+	if (ctf_handle == NULL)
+		return -1;
+
+	/* Strip typedefs and qualifiers to reach the pointer kind. */
+	for (depth = 0; depth < 16; depth++) {
+		kind = ctf_type_kind(ctf_handle, typeid);
+		switch (kind) {
+		case CTF_K_TYPEDEF:
+		case CTF_K_VOLATILE:
+		case CTF_K_CONST:
+		case CTF_K_RESTRICT:
+			typeid = ctf_type_reference(ctf_handle, typeid);
+			if (typeid == 0)
+				return -1;
+			continue;
+		default:
+			break;
+		}
+		break;
+	}
+
+	if (kind != CTF_K_POINTER)
+		return -1;
+
+	ref = ctf_type_reference(ctf_handle, typeid);
+	if (ref == 0)
+		return -1;
+
+	sz = ctf_type_size(ctf_handle, ref);
+	if (sz <= 0)
+		sz = (ssize_t)sizeof(uint64_t);
+
+	*elem_typeidp = ref;
+	*stridep = (uint32_t)sz;
+	return 0;
+}
+
+/*
+ * Resolve CTF type info for a single B_AT_FN_SUBSCRIPT node and assign it a
+ * capture slot in dtrq.  The base may be an argN builtin, a B_AT_FN_DEREF
+ * node, or a B_AT_FN_SUBSCRIPT node (for chained subscripts).
+ * Returns the assigned slot index on success, -1 on failure.
+ */
+static int
+fill_subscript_node(struct bt_subscript *bss, struct dtioc_probe_info *dtpi,
+    struct dtioc_req *dtrq)
+{
+	uint16_t elem_typeid;
+	uint32_t stride;
+	uint8_t slot;
+
+	if (dtrq->dtrq_nmemcap >= DTMAXMEMCAPS) {
+		if (verbose)
+			warnx("too many captures for probe %s",
+			    dtpi->dtpi_func);
+		return -1;
+	}
+
+	if (bss->bss_base->ba_type == B_AT_FN_DEREF) {
+		struct bt_deref *bd_inner = bss->bss_base->ba_value;
+		int inner_slot = fill_deref_node(bd_inner, dtpi, dtrq);
+
+		if (inner_slot < 0 || bd_inner->bd_typeid == 0)
+			return -1;
+		if (ctf_subscript_stride(bd_inner->bd_typeid, &elem_typeid,
+		    &stride) != 0) {
+			if (verbose)
+				warnx("cannot subscript '%s' for probe %s",
+				    ba_name(bss->bss_base), dtpi->dtpi_func);
+			return -1;
+		}
+		slot = dtrq->dtrq_nmemcap++;
+		dtrq->dtrq_memcap[slot].dtrmc_argn = (uint8_t)inner_slot;
+		dtrq->dtrq_memcap[slot].dtrmc_flags = DTMC_FL_MEMBASE;
+		dtrq->dtrq_memcap[slot].dtrmc_offset =
+		    (int32_t)(bss->bss_index * (long)stride);
+		dtrq->dtrq_memcap[slot].dtrmc_size =
+		    (uint16_t)MINIMUM(stride, sizeof(uint64_t));
+	} else if (bss->bss_base->ba_type == B_AT_FN_SUBSCRIPT) {
+		struct bt_subscript *bss_inner = bss->bss_base->ba_value;
+		int inner_slot = fill_subscript_node(bss_inner, dtpi, dtrq);
+
+		if (inner_slot < 0 || bss_inner->bss_typeid == 0)
+			return -1;
+		if (ctf_subscript_stride(bss_inner->bss_typeid, &elem_typeid,
+		    &stride) != 0) {
+			if (verbose)
+				warnx("cannot subscript '%s' for probe %s",
+				    ba_name(bss->bss_base), dtpi->dtpi_func);
+			return -1;
+		}
+		slot = dtrq->dtrq_nmemcap++;
+		dtrq->dtrq_memcap[slot].dtrmc_argn = (uint8_t)inner_slot;
+		dtrq->dtrq_memcap[slot].dtrmc_flags = DTMC_FL_MEMBASE;
+		dtrq->dtrq_memcap[slot].dtrmc_offset =
+		    (int32_t)(bss->bss_index * (long)stride);
+		dtrq->dtrq_memcap[slot].dtrmc_size =
+		    (uint16_t)MINIMUM(stride, sizeof(uint64_t));
+	} else {
+		/* Direct: base is an argN builtin. */
+		int argn = bss->bss_base->ba_type - B_AT_BI_ARG0;
+		uint16_t argtypes[DTMAXFUNCARGS];
+		uint16_t ret_type;
+		int nargs;
+
+		if (ctf_handle == NULL)
+			return -1;
+		nargs = ctf_func_info(ctf_handle, dtpi->dtpi_func,
+		    &ret_type, argtypes, DTMAXFUNCARGS);
+		if (nargs <= 0 || argn >= nargs)
+			return -1;
+		if (ctf_subscript_stride(argtypes[argn], &elem_typeid,
+		    &stride) != 0) {
+			if (verbose)
+				warnx("cannot subscript arg%d for probe %s",
+				    argn, dtpi->dtpi_func);
+			return -1;
+		}
+		slot = dtrq->dtrq_nmemcap++;
+		dtrq->dtrq_memcap[slot].dtrmc_argn = (uint8_t)argn;
+		dtrq->dtrq_memcap[slot].dtrmc_flags = 0;
+		dtrq->dtrq_memcap[slot].dtrmc_offset =
+		    (int32_t)(bss->bss_index * (long)stride);
+		dtrq->dtrq_memcap[slot].dtrmc_size =
+		    (uint16_t)MINIMUM(stride, sizeof(uint64_t));
+	}
+
+	dtrq->dtrq_evtflags |= DTEVT_MEMARGS;
+	bss->bss_stride = stride;
+	bss->bss_typeid = elem_typeid;
+	bss->bss_slot = slot;
+	return slot;
+}
+
+/*
  * Walk a bt_arg tree and for each B_AT_FN_DEREF node, resolve the
  * struct field offset/size via CTF and fill in the probe's dtrq_memcap.
  * Also stores resolved offset/size/slot in bt_deref for use at display time.
@@ -1583,6 +1776,9 @@ ba_fill_deref(struct bt_arg *ba, struct dtioc_probe_info *dtpi,
 		switch (ba->ba_type) {
 		case B_AT_FN_DEREF:
 			fill_deref_node(ba->ba_value, dtpi, dtrq);
+			break;
+		case B_AT_FN_SUBSCRIPT:
+			fill_subscript_node(ba->ba_value, dtpi, dtrq);
 			break;
 		case B_AT_MAP:
 			if (ba->ba_key != NULL)
@@ -1636,6 +1832,12 @@ fill_memcap(struct bt_stmt *bs, struct dtioc_probe_info *dtpi,
 			struct bt_for *bfor = (struct bt_for *)bs->bs_var;
 			if (bfor != NULL)
 				fill_memcap(bfor->bfor_body, dtpi, dtrq);
+			break;
+		}
+		case B_AC_WHILE: {
+			struct bt_while *bwh = (struct bt_while *)bs->bs_var;
+			if (bwh != NULL)
+				fill_memcap(bwh->bwh_body, dtpi, dtrq);
 			break;
 		}
 		default:
@@ -1701,6 +1903,22 @@ stmt_eval(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AC_TIME:
 		stmt_time(bs, dtev);
 		break;
+	case B_AC_WHILE: {
+		struct bt_while *bwh = (struct bt_while *)bs->bs_var;
+		int iters = 0;
+
+		while (stmt_test(bs, dtev)) {
+			bbs = bwh->bwh_body;
+			while (bbs != NULL) {
+				if (stmt_eval(bbs, dtev))
+					return 1;
+				bbs = SLIST_NEXT(bbs, bs_next);
+			}
+			if (++iters >= 1024)
+				break;
+		}
+		break;
+	}
 	case B_AC_ZERO:
 		stmt_zero(bs);
 		break;
@@ -2122,6 +2340,7 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AT_BI_RETVAL:
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 	case B_AT_FN_DEREF:
+	case B_AT_FN_SUBSCRIPT:
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		bv->bv_value = baeval(ba, dtev);
 		bv->bv_type = B_VT_LONG;
@@ -2296,6 +2515,7 @@ baeval(struct bt_arg *bval, struct dt_evt *dtev)
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 	case B_AT_BI_RETVAL:
 	case B_AT_FN_DEREF:
+	case B_AT_FN_SUBSCRIPT:
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		ba = ba_new(ba2long(bval, dtev), B_AT_LONG);
 		break;
@@ -2611,6 +2831,13 @@ ba_name(struct bt_arg *ba)
 		    ba_name(bd->bd_base), bd->bd_field);
 		return buf;
 	}
+	case B_AT_FN_SUBSCRIPT: {
+		static char buf[64];
+		struct bt_subscript *bss = ba->ba_value;
+		snprintf(buf, sizeof(buf), "%s[%ld]",
+		    ba_name(bss->bss_base), bss->bss_index);
+		return buf;
+	}
 	case B_AT_OP_PLUS:
 		return "+";
 	case B_AT_OP_MINUS:
@@ -2750,6 +2977,12 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 		struct bt_deref *bd = ba->ba_value;
 		val = (bd->bd_slot != BD_SLOT_UNSET)
 		    ? (long)dtev->dtev_mem[bd->bd_slot] : 0;
+		break;
+	}
+	case B_AT_FN_SUBSCRIPT: {
+		struct bt_subscript *bss = ba->ba_value;
+		val = (bss->bss_slot != BSS_SLOT_UNSET)
+		    ? (long)dtev->dtev_mem[bss->bss_slot] : 0;
 		break;
 	}
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
@@ -2931,6 +3164,14 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		str = buf;
 		break;
 	}
+	case B_AT_FN_SUBSCRIPT: {
+		struct bt_subscript *bss = ba->ba_value;
+		uint64_t v = (bss->bss_slot != BSS_SLOT_UNSET)
+		    ? dtev->dtev_mem[bss->bss_slot] : 0;
+		snprintf(buf, sizeof(buf), "%ld", (long)v);
+		str = buf;
+		break;
+	}
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		snprintf(buf, sizeof(buf), "%ld", ba2long(ba, dtev));
 		str = buf;
@@ -3021,6 +3262,7 @@ ba2flags(struct bt_arg *ba)
 		break;
 	}
 	case B_AT_FN_DEREF:
+	case B_AT_FN_SUBSCRIPT:
 		/* We need the arg's register value (pointer) to dereference. */
 		flags |= DTEVT_FUNCARGS;
 		break;
