@@ -177,6 +177,25 @@ map_print(struct map *map, size_t top, const char *name)
 	free(elms);
 }
 
+/*
+ * Iterate all entries in the map in key order, calling cb(key, val, arg)
+ * for each.  If cb returns non-zero, iteration stops early.
+ */
+void
+map_foreach(struct map *map, int (*cb)(const char *, struct bt_arg *, void *),
+    void *arg)
+{
+	struct mentry *mep;
+
+	if (map == NULL)
+		return;
+
+	RB_FOREACH(mep, map, map) {
+		if (cb(mep->mkey, mep->mval, arg))
+			break;
+	}
+}
+
 void
 map_zero(struct map *map)
 {
