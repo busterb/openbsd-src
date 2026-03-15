@@ -108,6 +108,7 @@ struct bt_var {
 		B_VT_TUPLE,
 		B_VT_MAP,
 		B_VT_HIST,
+		B_VT_MAPHIST,		/* @map[key] = hist(val) */
 	}			 bv_type;
 	int			 bv_printed;	/* was explicitly printed */
 };
@@ -232,6 +233,7 @@ struct bt_stmt {
 		B_AC_DELETE,			/* delete(@map[key]) */
 		B_AC_EXIT,			/* exit() */
 		B_AC_INSERT,			/* @map[key] = 42 */
+		B_AC_MAPHIST,			/* @map[key] = hist(val) */
 		B_AC_PRINT,			/* print(@map, 10) */
 		B_AC_PRINTF,			/* printf("hello!\n") */
 		B_AC_STORE,			/* @a = 3 */
