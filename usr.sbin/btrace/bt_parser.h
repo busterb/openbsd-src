@@ -163,6 +163,8 @@ struct bt_arg {
 		B_AT_MF_MAX,			/* @map[key] = max(nsecs) */
 		B_AT_MF_MIN,			/* @map[key] = min(pid) */
 		B_AT_MF_SUM,			/* @map[key] = sum(@elapsed) */
+		B_AT_MF_AVG,			/* @map[key] = avg(nsecs) */
+		B_AT_MF_STATS,			/* @map[key] = stats(nsecs) */
 
 		B_AT_OP_PLUS,
 		B_AT_OP_MINUS,
