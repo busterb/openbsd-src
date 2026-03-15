@@ -195,18 +195,27 @@ struct bt_arg {
 #define BA_INITIALIZER(v, t)	{ { NULL }, (void *)(v), NULL, (t) }
 
 /*
- * Struct member dereference node: arg0->field.
+ * Struct member dereference node: arg0->field or arg0->ptr->field.
  *
- * bd_base points to the argN node being dereferenced.
- * bd_field names the struct member.
- * bd_offset and bd_size are filled at setup time via CTF lookup.
+ * bd_base points to the base node, which is either:
+ *   - a B_AT_BI_ARGx node for a direct dereference (arg0->field), or
+ *   - a B_AT_FN_DEREF node for a chained dereference (arg0->ptr->field).
+ * bd_field names the member to capture.
+ * bd_offset, bd_size, bd_typeid, and bd_slot are filled at setup time
+ * in btrace.c when CTF type information is resolved per-probe.
+ * bd_slot is the index into dtev_mem[] where the captured value is stored;
+ * initialized to DTMAXMEMCAPS (not-yet-assigned sentinel).
  */
 struct bt_deref {
-	struct bt_arg		*bd_base;	/* argN node (B_AT_BI_ARGx) */
+	struct bt_arg		*bd_base;	/* argN or B_AT_FN_DEREF node */
 	const char		*bd_field;	/* field name */
 	uint32_t		 bd_offset;	/* byte offset (set at setup) */
 	uint16_t		 bd_size;	/* field size in bytes (set at setup) */
+	uint16_t		 bd_typeid;	/* CTF type ID of this field */
+	uint8_t			 bd_slot;	/* dtev_mem output slot */
 };
+
+#define BD_SLOT_UNSET	0xff		/* bd_slot sentinel: not yet assigned */
 
 /*
  * Represents branches of an if-else statement.
