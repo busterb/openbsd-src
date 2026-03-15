@@ -118,6 +118,7 @@ void			 fill_memcap(struct bt_stmt *, struct dtioc_probe_info *,
 			     struct dtioc_req *);
 int			 stmt_eval(struct bt_stmt *, struct dt_evt *);
 void			 stmt_bucketize(struct bt_stmt *, struct dt_evt *);
+void			 stmt_map_bucketize(struct bt_stmt *, struct dt_evt *);
 void			 stmt_clear(struct bt_stmt *);
 void			 stmt_delete(struct bt_stmt *, struct dt_evt *);
 void			 stmt_insert(struct bt_stmt *, struct dt_evt *);
@@ -603,6 +604,7 @@ rules_action_scan(struct bt_stmt *bs)
 		switch (bs->bs_act) {
 		case B_AC_BUCKETIZE:
 		case B_AC_INSERT:
+		case B_AC_MAPHIST:
 			ba = (struct bt_arg *)bs->bs_var;
 			evtflags |= ba2dtflags(ba);
 			break;
@@ -676,6 +678,7 @@ rules_strargs_scan(struct bt_stmt *bs)
 		switch (bs->bs_act) {
 		case B_AC_BUCKETIZE:
 		case B_AC_INSERT:
+		case B_AC_MAPHIST:
 			ba = (struct bt_arg *)bs->bs_var;
 			mask |= ba2strargs(ba);
 			break;
@@ -774,6 +777,7 @@ rules_strlen_scan(struct bt_stmt *bs)
 		switch (bs->bs_act) {
 		case B_AC_BUCKETIZE:
 		case B_AC_INSERT:
+		case B_AC_MAPHIST:
 			ba = (struct bt_arg *)bs->bs_var;
 			l = ba_strlen(ba);
 			if (l > maxlen)
@@ -1076,12 +1080,16 @@ rule_printmaps(struct bt_rule *r)
 		struct bt_arg *ba;
 
 		SLIST_FOREACH(ba, &bs->bs_args, ba_next) {
-			struct bt_var *bv = ba->ba_value;
+			struct bt_var *bv;
 			struct map *map;
 
 			if (ba->ba_type != B_AT_MAP && ba->ba_type != B_AT_HIST)
 				continue;
+			/* B_AT_HIST sentinel used by B_AC_MAPHIST has NULL value */
+			if (ba->ba_value == NULL)
+				continue;
 
+			bv = ba->ba_value;
 			map = (struct map *)bv->bv_value;
 			if (map == NULL)
 				continue;
@@ -1090,7 +1098,9 @@ rule_printmaps(struct bt_rule *r)
 			if (bv->bv_printed)
 				continue;
 
-			if (ba->ba_type == B_AT_MAP)
+			if (bv->bv_type == B_VT_MAPHIST)
+				map_hist_print(map, bv_name(bv));
+			else if (ba->ba_type == B_AT_MAP)
 				map_print(map, SIZE_T_MAX, bv_name(bv));
 			else
 				hist_print((struct hist *)map, bv_name(bv));
@@ -1510,6 +1520,7 @@ fill_memcap(struct bt_stmt *bs, struct dtioc_probe_info *dtpi,
 		switch (bs->bs_act) {
 		case B_AC_BUCKETIZE:
 		case B_AC_INSERT:
+		case B_AC_MAPHIST:
 			ba = (struct bt_arg *)bs->bs_var;
 			ba_fill_deref(ba, dtpi, dtrq);
 			break;
@@ -1540,6 +1551,9 @@ stmt_eval(struct bt_stmt *bs, struct dt_evt *dtev)
 	switch (bs->bs_act) {
 	case B_AC_BUCKETIZE:
 		stmt_bucketize(bs, dtev);
+		break;
+	case B_AC_MAPHIST:
+		stmt_map_bucketize(bs, dtev);
 		break;
 	case B_AC_CLEAR:
 		stmt_clear(bs);
@@ -1630,6 +1644,46 @@ stmt_bucketize(struct bt_stmt *bs, struct dt_evt *dtev)
 	bv->bv_printed = 0;
 }
 
+/*
+ * Keyed histogram insert:	{ @map[key] = hist(val); }
+ *				{ @map[key] = lhist(val, min, max, step); }
+ */
+void
+stmt_map_bucketize(struct bt_stmt *bs, struct dt_evt *dtev)
+{
+	struct bt_arg *bmap = SLIST_FIRST(&bs->bs_args);
+	struct bt_arg *bhist = SLIST_NEXT(bmap, ba_next);
+	struct bt_arg *bval = (struct bt_arg *)bs->bs_var;
+	struct bt_var *bv = bmap->ba_value;
+	struct bt_arg *brange;
+	struct map *map;
+	const char *mhash, *bucket;
+	long step = 0;
+
+	assert(bmap->ba_type == B_AT_MAP);
+	assert(bhist->ba_type == B_AT_HIST);
+	assert(SLIST_NEXT(bval, ba_next) == NULL);
+
+	brange = bhist->ba_key;
+	mhash = ba2hash(bmap->ba_key, dtev);
+	bucket = ba2bucket(bval, brange, dtev, &step);
+	if (bucket == NULL) {
+		debug("maphist '%s'[%s] value=%lu out of range\n",
+		    bv_name(bv), mhash, ba2long(bval, dtev));
+		return;
+	}
+
+	map = (struct map *)bv->bv_value;
+	if (map == NULL) {
+		map = map_new();
+		bv->bv_value = (struct bt_arg *)map;
+		bv->bv_type = B_VT_MAPHIST;
+		bv->bv_printed = 0;
+	}
+
+	map_hist_bucket(map, mhash, bucket, step);
+	debug("maphist '%s'[%s] bucket '%s'\n", bv_name(bv), mhash, bucket);
+}
 
 /*
  * Empty a map:		{ clear(@map); }
@@ -1648,7 +1702,8 @@ stmt_clear(struct bt_stmt *bs)
 	if (map == NULL)
 		return;
 
-	if (bv->bv_type != B_VT_MAP && bv->bv_type != B_VT_HIST)
+	if (bv->bv_type != B_VT_MAP && bv->bv_type != B_VT_HIST &&
+	    bv->bv_type != B_VT_MAPHIST)
 		errx(1, "invalid variable type for clear(%s)", ba_name(ba));
 
 	map_clear(map);
@@ -1818,6 +1873,9 @@ stmt_print(struct bt_stmt *bs, struct dt_evt *dtev)
 		bv->bv_printed = 1;
 	} else if (bv->bv_type == B_VT_HIST) {
 		hist_print((struct hist *)map, bv_name(bv));
+		bv->bv_printed = 1;
+	} else if (bv->bv_type == B_VT_MAPHIST) {
+		map_hist_print(map, bv_name(bv));
 		bv->bv_printed = 1;
 	} else
 		printf("%s\n", ba2str(ba, dtev));
@@ -2002,7 +2060,8 @@ stmt_zero(struct bt_stmt *bs)
 	if (map == NULL)
 		return;
 
-	if (bv->bv_type != B_VT_MAP && bv->bv_type != B_VT_HIST)
+	if (bv->bv_type != B_VT_MAP && bv->bv_type != B_VT_HIST &&
+	    bv->bv_type != B_VT_MAPHIST)
 		errx(1, "invalid variable type for zero(%s)", ba_name(ba));
 
 	map_zero(map);
