@@ -51,6 +51,22 @@
 #define MINIMUM(a, b)	(((a) < (b)) ? (a) : (b))
 #define MAXIMUM(a, b)	(((a) > (b)) ? (a) : (b))
 
+/* Per-key state for avg() and stats() aggregations. */
+struct avgstate {
+	long		 count;
+	long		 sum;
+};
+
+/*
+ * Combined allocation: bt_arg header immediately followed by avgstate.
+ * ba.ba_value points to the embedded state field, so freeing ba also
+ * frees the state without a separate allocation.
+ */
+struct bt_avg {
+	struct bt_arg	 ba;
+	struct avgstate	 state;
+};
+
 /*
  * Maximum number of operands an arithmetic operation can have.  This
  * is necessary to stop infinite recursion when evaluating expressions.
@@ -1696,7 +1712,7 @@ stmt_insert(struct bt_stmt *bs, struct dt_evt *dtev)
 	if (map == NULL)
 		map = map_new();
 
-	/* Operate on existring value for count(), max(), min() and sum(). */
+	/* Operate on existing value for count(), max(), min() and sum(). */
 	switch (bval->ba_type) {
 	case B_AT_MF_COUNT:
 		val = ba2long(map_get(map, hash), NULL);
@@ -1718,12 +1734,40 @@ stmt_insert(struct bt_stmt *bs, struct dt_evt *dtev)
 		val += ba2long(bval->ba_value, dtev);
 		bval = ba_new(val, B_AT_LONG);
 		break;
+	case B_AT_MF_AVG:
+	case B_AT_MF_STATS: {
+		struct bt_arg *cur = map_get(map, hash);
+		struct avgstate *as;
+		long sample = ba2long(bval->ba_value, dtev);
+		enum bt_argtype type = bval->ba_type;
+
+		if (cur->ba_type == B_AT_MF_AVG ||
+		    cur->ba_type == B_AT_MF_STATS) {
+			/* Update state in place; skip map_insert. */
+			as = (struct avgstate *)cur->ba_value;
+			as->count++;
+			as->sum += sample;
+			bval = NULL;
+		} else {
+			/* First insertion for this key. */
+			struct bt_avg *bav = calloc(1, sizeof(*bav));
+			if (bav == NULL)
+				err(1, "avg: calloc");
+			bav->ba.ba_type = type;
+			bav->ba.ba_value = &bav->state;
+			bav->state.count = 1;
+			bav->state.sum = sample;
+			bval = &bav->ba;
+		}
+		break;
+	}
 	default:
 		bval = baeval(bval, dtev);
 		break;
 	}
 
-	map_insert(map, hash, bval);
+	if (bval != NULL)
+		map_insert(map, hash, bval);
 
 	debug("map=%p '%s' insert key=%p '%s' bval=%p\n", map,
 	    bv_name(bv), bkey, hash, bval);
@@ -2467,6 +2511,12 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		val = baexpr2long(ba, dtev);
 		break;
+	case B_AT_MF_AVG:
+	case B_AT_MF_STATS: {
+		struct avgstate *as = (struct avgstate *)ba->ba_value;
+		val = (as->count > 0) ? as->sum / as->count : 0;
+		break;
+	}
 	default:
 		xabort("no long conversion for type %d", ba->ba_type);
 	}
@@ -2631,6 +2681,21 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_MF_SUM:
 		assert(0);
 		break;
+	case B_AT_MF_AVG: {
+		struct avgstate *as = (struct avgstate *)ba->ba_value;
+		long avg = (as->count > 0) ? as->sum / as->count : 0;
+		snprintf(buf, sizeof(buf), "%ld", avg);
+		str = buf;
+		break;
+	}
+	case B_AT_MF_STATS: {
+		struct avgstate *as = (struct avgstate *)ba->ba_value;
+		long avg = (as->count > 0) ? as->sum / as->count : 0;
+		snprintf(buf, sizeof(buf), "count %ld, avg %ld, total %ld",
+		    as->count, avg, as->sum);
+		str = buf;
+		break;
+	}
 	default:
 		xabort("no string conversion for type %d", ba->ba_type);
 	}
@@ -2678,9 +2743,14 @@ ba2flags(struct bt_arg *ba)
 	case B_AT_BI_PROBE:
 		break;
 	case B_AT_MF_COUNT:
+		break;
 	case B_AT_MF_MAX:
 	case B_AT_MF_MIN:
 	case B_AT_MF_SUM:
+	case B_AT_MF_AVG:
+	case B_AT_MF_STATS:
+		if (ba->ba_value != NULL)
+			flags |= ba2dtflags(ba->ba_value);
 		break;
 	case B_AT_FN_STR: {
 		struct bt_arg *inner = (struct bt_arg *)ba->ba_value;
@@ -2747,6 +2817,8 @@ bacmp(struct bt_arg *a, struct bt_arg *b)
 
 	switch (a->ba_type) {
 	case B_AT_LONG:
+	case B_AT_MF_AVG:
+	case B_AT_MF_STATS:
 		return ba2long(a, NULL) - ba2long(b, NULL);
 	case B_AT_STR:
 		strlcpy(astr, ba2str(a, NULL), sizeof(astr));
