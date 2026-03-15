@@ -41,6 +41,13 @@
 #define DTMAXARGTYPES	5
 
 /*
+ * Maximum number of struct member capture specs per probe.
+ * Supports chained dereferences (e.g. arg0->next->value) and
+ * multiple field captures from the same argument.
+ */
+#define DTMAXMEMCAPS	20
+
+/*
  * Maximum length of a string argument captured by str().
  */
 #define DT_STRLEN	1024
@@ -74,7 +81,7 @@ struct dt_evt {
 #define dtev_retval	_args.E_return.__retval	/* function retval */
 #define dtev_error	_args.E_return.__error	/* function error */
 	char			dtev_str[DTMAXFUNCARGS][DT_STRLEN]; /* str() arg captures */
-	uint64_t		dtev_mem[DTMAXFUNCARGS]; /* struct member captures */
+	uint64_t		dtev_mem[DTMAXMEMCAPS]; /* struct member captures */
 };
 
 /*
@@ -122,13 +129,22 @@ struct dtioc_arg {
 };
 
 /*
- * Per-argument struct member capture spec: byte offset and size to copy
- * at probe fire time when DTEVT_MEMARGS is set.
+ * Struct member capture spec.  At probe fire time, dtrmc_size bytes are
+ * read from (base + dtrmc_offset) and stored in dtev_mem[slot], where
+ * slot is the spec's position in the dtrq_memcap[] array.
+ *
+ * If DTMC_FL_MEMBASE is set, the base address is taken from
+ * dtev_mem[dtrmc_argn] (a previously captured pointer), enabling
+ * chained dereferences such as arg0->next->value.
+ * Otherwise, the base address is dtev_args[dtrmc_argn].
  */
+#define DTMC_FL_MEMBASE	0x01	/* base = dtev_mem[dtrmc_argn] */
+
 struct dtrq_memcap {
-	uint32_t		 dtrmc_offset;	/* byte offset into struct */
+	int32_t			 dtrmc_offset;	/* signed byte offset from base */
 	uint16_t		 dtrmc_size;	/* bytes to copy (1, 2, 4, or 8) */
-	uint16_t		 _pad;
+	uint8_t			 dtrmc_argn;	/* source index */
+	uint8_t			 dtrmc_flags;	/* DTMC_FL_MEMBASE */
 };
 
 struct dtioc_req {
@@ -137,9 +153,9 @@ struct dtioc_req {
 	uint16_t		 dtrq_strlen;	/* max bytes per str() arg capture */
 	uint64_t		 dtrq_evtflags;	/* states to record */
 	uint64_t		 dtrq_nsecs;	/* execution period */
-	uint16_t		 dtrq_memargs;	/* bitmask: which args need mem capture */
-	uint16_t		 _pad[3];
-	struct dtrq_memcap	 dtrq_memcap[DTMAXFUNCARGS]; /* per-arg capture specs */
+	uint8_t			 dtrq_nmemcap;	/* # of active capture specs */
+	uint8_t			 _pad[7];
+	struct dtrq_memcap	 dtrq_memcap[DTMAXMEMCAPS]; /* capture specs */
 };
 
 struct dtioc_stat {
@@ -206,8 +222,8 @@ struct dt_pcb {
 	uint64_t		 dp_evtflags;	/* [I] event states to record */
 	uint16_t		 dp_strargs;	/* [I] bitmask of str() args */
 	uint16_t		 dp_strlen;	/* [I] max bytes per str() arg capture */
-	uint16_t		 dp_memargs;	/* [I] bitmask of mem-capture args */
-	struct dtrq_memcap	 dp_memcap[DTMAXFUNCARGS]; /* [I] per-arg capture specs */
+	uint8_t			 dp_nmemcap;	/* [I] # of active capture specs */
+	struct dtrq_memcap	 dp_memcap[DTMAXMEMCAPS]; /* [I] capture specs */
 
 	/* Provider specific fields. */
 	struct clockintr	 dp_clockintr;	/* [D] profiling handle */
@@ -225,7 +241,7 @@ void		 dt_pcb_ring_skiptick(struct dt_pcb *, unsigned int);
 struct dt_evt	*dt_pcb_ring_get(struct dt_pcb *, int);
 void		 dt_pcb_ring_consume(struct dt_pcb *, struct dt_evt *);
 void		 dt_copy_strargs(struct dt_evt *, uint16_t, size_t);
-void		 dt_copy_memargs(struct dt_evt *, uint16_t,
+void		 dt_copy_memargs(struct dt_evt *, uint8_t,
 		     const struct dtrq_memcap *);
 
 /*

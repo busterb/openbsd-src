@@ -464,22 +464,25 @@ ba_new0(void *val, enum bt_argtype type)
 
 /*
  * Create a struct member dereference node: base->field.
- * base must be an argN builtin; the offset and size are filled at setup
- * time in btrace.c when CTF type information is resolved per-probe.
+ * base must be an argN builtin or a B_AT_FN_DEREF node (for chains like
+ * arg0->ptr->field).  The offset, size, typeid, and slot fields are filled
+ * at setup time in btrace.c when CTF type information is resolved per-probe.
  */
 struct bt_arg *
 bd_new(struct bt_arg *base, const char *field)
 {
 	struct bt_deref *bd;
 
-	if (base->ba_type < B_AT_BI_ARG0 || base->ba_type > B_AT_BI_ARG9)
-		yyerror("'->' can only be applied to argN");
+	if (base->ba_type != B_AT_FN_DEREF &&
+	    (base->ba_type < B_AT_BI_ARG0 || base->ba_type > B_AT_BI_ARG9))
+		yyerror("'->' can only be applied to argN or argN->field");
 
 	bd = calloc(1, sizeof(*bd));
 	if (bd == NULL)
 		err(1, "bt_deref: calloc");
 	bd->bd_base = base;
 	bd->bd_field = field;
+	bd->bd_slot = BD_SLOT_UNSET;	/* not yet assigned */
 
 	return ba_new(bd, B_AT_FN_DEREF);
 }

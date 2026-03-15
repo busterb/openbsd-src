@@ -929,29 +929,34 @@ dt_copy_strargs(struct dt_evt *dtev, uint16_t strargs, size_t maxlen)
 }
 
 /*
- * For each bit set in `memargs', copy dtrmc_size bytes from
- * dtev_args[i] + dtrmc_offset into dtev_mem[i].  Called at probe fire time.
- * kcopy() is used for fault-tolerant kernel address access; on fault the
- * slot is left as zero.
+ * Execute up to `nmemcap' capture specs, storing results in dtev_mem[].
+ * Each spec reads `dtrmc_size' bytes from (base + dtrmc_offset) where
+ * base is either dtev_args[dtrmc_argn] or, when DTMC_FL_MEMBASE is set,
+ * the pointer previously captured in dtev_mem[dtrmc_argn].  Specs are
+ * processed in order so that later specs may follow pointers captured
+ * by earlier ones (chained dereferences).
+ * kcopy() is used for fault-tolerant access; on fault the slot is zero.
  */
 void
-dt_copy_memargs(struct dt_evt *dtev, uint16_t memargs,
+dt_copy_memargs(struct dt_evt *dtev, uint8_t nmemcap,
     const struct dtrq_memcap *memcap)
 {
-	int i;
+	uint8_t i;
 
-	for (i = 0; i < DTMAXFUNCARGS; i++) {
-		uint16_t size;
-		vaddr_t addr;
+	for (i = 0; i < nmemcap; i++) {
+		vaddr_t base, addr;
+		uint16_t size = memcap[i].dtrmc_size;
 
-		if (!(memargs & (1u << i)))
-			continue;
-		if (dtev->dtev_args[i] == 0)
-			continue;
-		size = memcap[i].dtrmc_size;
 		if (size == 0 || size > sizeof(dtev->dtev_mem[i]))
 			continue;
-		addr = dtev->dtev_args[i] + memcap[i].dtrmc_offset;
+		if (memcap[i].dtrmc_flags & DTMC_FL_MEMBASE) {
+			base = (vaddr_t)dtev->dtev_mem[memcap[i].dtrmc_argn];
+		} else {
+			base = dtev->dtev_args[memcap[i].dtrmc_argn];
+		}
+		if (base == 0)
+			continue;
+		addr = base + (vaddr_t)(int32_t)memcap[i].dtrmc_offset;
 		dtev->dtev_mem[i] = 0;
 		kcopy((const void *)addr, &dtev->dtev_mem[i], size);
 	}

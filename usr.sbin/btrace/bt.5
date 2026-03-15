@@ -259,7 +259,7 @@ is converted to a string representation at display time.
 The result is truncated to
 .Va maxlen
 bytes (up to 1024, the default), including the NUL-terminator.
-.It Ar argN Ic -> Ar field
+.It Ar argN Ic -> Ar field Oo Ic -> Ar field2 Oc ...
 Dereference a struct member from a probe argument.
 .Ar argN
 must be a pointer to a struct or union.
@@ -267,10 +267,23 @@ must be a pointer to a struct or union.
 names the member to capture.
 The field value is read from kernel memory at probe fire time and stored
 as a 64-bit integer.
+The
+.Ic ->
+operator may be chained to follow pointer fields through multiple levels
+of indirection:
+.Ar argN Ic -> Ar ptr_field Ic -> Ar field2
+first captures the pointer stored in
+.Ar ptr_field ,
+then reads
+.Ar field2
+from the struct it points to.
+Up to
+.Dv DTMAXMEMCAPS
+field captures may be active per probe across all dereference expressions.
 Type information from CTF data in
 .Pa /bsd
-is used to determine the field offset and size.
-If CTF data is unavailable or the field cannot be resolved, the value
+is used to determine field offsets and sizes.
+If CTF data is unavailable or a field cannot be resolved, the value
 is 0.
 Currently only applies to
 .Cm kprobe
