@@ -110,8 +110,12 @@ uint16_t		 ba2strargs(struct bt_arg *);
 uint16_t		 rules_strargs_scan(struct bt_stmt *);
 uint16_t		 ba_strlen(struct bt_arg *);
 uint16_t		 rules_strlen_scan(struct bt_stmt *);
+static int		 ctf_deref_field(uint16_t, const char *,
+			     uint32_t *, uint16_t *, uint16_t *);
 int			 ctf_resolve_deref(const char *, int, const char *,
-			     uint32_t *, uint16_t *);
+			     uint32_t *, uint16_t *, uint16_t *);
+static int		 fill_deref_node(struct bt_deref *,
+			     struct dtioc_probe_info *, struct dtioc_req *);
 void			 ba_fill_deref(struct bt_arg *, struct dtioc_probe_info *,
 			     struct dtioc_req *);
 void			 fill_memcap(struct bt_stmt *, struct dtioc_probe_info *,
@@ -1367,6 +1371,7 @@ struct deref_info {
 	const char	*field;
 	uint32_t	 offset;	/* byte offset of member */
 	uint16_t	 size;		/* size of member type in bytes */
+	uint16_t	 typeid;	/* CTF type ID of member (for chaining) */
 	int		 found;
 };
 
@@ -1385,36 +1390,30 @@ deref_member_cb(const char *name, uint16_t typeid, unsigned long offset_bits,
 	if (sz <= 0 || sz > (ssize_t)sizeof(uint64_t))
 		sz = sizeof(uint64_t);
 	info->size = (uint16_t)sz;
+	info->typeid = typeid;
 	info->found = 1;
 	return 1;	/* stop iteration */
 }
 
 /*
- * Using CTF, resolve the byte offset and size of `field' in the struct
- * pointed to by argument `argn' of kernel function `funcname'.
- * Returns 0 on success, -1 if CTF is unavailable or resolution fails.
+ * Resolve the byte offset and size of `field' in the struct pointed to
+ * by the pointer type `ptr_typeid'.  Optionally returns the CTF type ID
+ * of the field in `*field_typeidp' for use in chained dereferences.
+ * Returns 0 on success, -1 if CTF data is unavailable or resolution fails.
  */
-int
-ctf_resolve_deref(const char *funcname, int argn, const char *field,
-    uint32_t *offsetp, uint16_t *sizep)
+static int
+ctf_deref_field(uint16_t ptr_typeid, const char *field,
+    uint32_t *offsetp, uint16_t *sizep, uint16_t *field_typeidp)
 {
-	uint16_t argtypes[DTMAXFUNCARGS];
-	uint16_t ret_type, typeid, ref;
+	uint16_t typeid = ptr_typeid, ref;
 	uint16_t kind;
 	struct deref_info info;
-	int nargs, depth;
+	int depth;
 
 	if (ctf_handle == NULL)
 		return -1;
 
-	nargs = ctf_func_info(ctf_handle, funcname, &ret_type, argtypes,
-	    DTMAXFUNCARGS);
-	if (nargs <= 0 || argn >= nargs)
-		return -1;
-
-	typeid = argtypes[argn];
-
-	/* Resolve typedefs and qualifiers to get the actual kind. */
+	/* Resolve typedefs and qualifiers to get the pointer kind. */
 	for (depth = 0; depth < 16; depth++) {
 		kind = ctf_type_kind(ctf_handle, typeid);
 		switch (kind) {
@@ -1469,41 +1468,121 @@ ctf_resolve_deref(const char *funcname, int argn, const char *field,
 
 	*offsetp = info.offset;
 	*sizep = info.size;
+	if (field_typeidp != NULL)
+		*field_typeidp = info.typeid;
 	return 0;
+}
+
+/*
+ * Using CTF, resolve the byte offset and size of `field' in the struct
+ * pointed to by argument `argn' of kernel function `funcname'.
+ * Optionally returns the CTF type ID of the resolved field in `*field_typeidp'
+ * for use in chained dereferences.
+ * Returns 0 on success, -1 if CTF is unavailable or resolution fails.
+ */
+int
+ctf_resolve_deref(const char *funcname, int argn, const char *field,
+    uint32_t *offsetp, uint16_t *sizep, uint16_t *field_typeidp)
+{
+	uint16_t argtypes[DTMAXFUNCARGS];
+	uint16_t ret_type;
+	int nargs;
+
+	if (ctf_handle == NULL)
+		return -1;
+
+	nargs = ctf_func_info(ctf_handle, funcname, &ret_type, argtypes,
+	    DTMAXFUNCARGS);
+	if (nargs <= 0 || argn >= nargs)
+		return -1;
+
+	return ctf_deref_field(argtypes[argn], field, offsetp, sizep,
+	    field_typeidp);
+}
+
+/*
+ * Resolve CTF type info for a single B_AT_FN_DEREF node and assign it a
+ * capture slot in dtrq.  For chained dereferences (bd_base is itself a
+ * B_AT_FN_DEREF), the inner node is processed first so its slot is known.
+ * Returns the assigned slot index on success, -1 on failure.
+ */
+static int
+fill_deref_node(struct bt_deref *bd, struct dtioc_probe_info *dtpi,
+    struct dtioc_req *dtrq)
+{
+	uint32_t offset;
+	uint16_t size;
+	uint8_t slot;
+
+	if (dtrq->dtrq_nmemcap >= DTMAXMEMCAPS) {
+		if (verbose)
+			warnx("too many struct dereferences for probe %s",
+			    dtpi->dtpi_func);
+		return -1;
+	}
+
+	if (bd->bd_base->ba_type == B_AT_FN_DEREF) {
+		/* Chained: resolve the inner node first to get its typeid. */
+		struct bt_deref *bd_inner = bd->bd_base->ba_value;
+		int inner_slot;
+
+		inner_slot = fill_deref_node(bd_inner, dtpi, dtrq);
+		if (inner_slot < 0)
+			return -1;
+		if (bd_inner->bd_typeid == 0)
+			return -1;
+		if (ctf_deref_field(bd_inner->bd_typeid, bd->bd_field,
+		    &offset, &size, &bd->bd_typeid) != 0) {
+			if (verbose)
+				warnx("cannot resolve '%s->%s' for probe %s",
+				    ba_name(bd->bd_base), bd->bd_field,
+				    dtpi->dtpi_func);
+			return -1;
+		}
+		slot = dtrq->dtrq_nmemcap++;
+		dtrq->dtrq_memcap[slot].dtrmc_argn = (uint8_t)inner_slot;
+		dtrq->dtrq_memcap[slot].dtrmc_flags = DTMC_FL_MEMBASE;
+		dtrq->dtrq_memcap[slot].dtrmc_offset = (int32_t)offset;
+		dtrq->dtrq_memcap[slot].dtrmc_size = size;
+	} else {
+		/* Direct: base is an argN builtin. */
+		int argn = bd->bd_base->ba_type - B_AT_BI_ARG0;
+
+		if (ctf_resolve_deref(dtpi->dtpi_func, argn, bd->bd_field,
+		    &offset, &size, &bd->bd_typeid) != 0) {
+			if (verbose)
+				warnx("cannot resolve '%s->%s' for probe %s",
+				    ba_name(bd->bd_base), bd->bd_field,
+				    dtpi->dtpi_func);
+			return -1;
+		}
+		slot = dtrq->dtrq_nmemcap++;
+		dtrq->dtrq_memcap[slot].dtrmc_argn = (uint8_t)argn;
+		dtrq->dtrq_memcap[slot].dtrmc_flags = 0;
+		dtrq->dtrq_memcap[slot].dtrmc_offset = (int32_t)offset;
+		dtrq->dtrq_memcap[slot].dtrmc_size = size;
+	}
+
+	dtrq->dtrq_evtflags |= DTEVT_MEMARGS;
+	bd->bd_offset = offset;
+	bd->bd_size = size;
+	bd->bd_slot = slot;
+	return slot;
 }
 
 /*
  * Walk a bt_arg tree and for each B_AT_FN_DEREF node, resolve the
  * struct field offset/size via CTF and fill in the probe's dtrq_memcap.
- * Also stores resolved offset/size in bt_deref for use at display time.
+ * Also stores resolved offset/size/slot in bt_deref for use at display time.
  */
 void
 ba_fill_deref(struct bt_arg *ba, struct dtioc_probe_info *dtpi,
     struct dtioc_req *dtrq)
 {
-	struct bt_deref *bd;
-	uint32_t offset;
-	uint16_t size;
-	int argn;
-
 	while (ba != NULL) {
 		switch (ba->ba_type) {
 		case B_AT_FN_DEREF:
-			bd = ba->ba_value;
-			argn = bd->bd_base->ba_type - B_AT_BI_ARG0;
-			if (ctf_resolve_deref(dtpi->dtpi_func, argn,
-			    bd->bd_field, &offset, &size) == 0) {
-				dtrq->dtrq_memcap[argn].dtrmc_offset = offset;
-				dtrq->dtrq_memcap[argn].dtrmc_size = size;
-				dtrq->dtrq_memargs |= (1u << argn);
-				dtrq->dtrq_evtflags |= DTEVT_MEMARGS;
-				bd->bd_offset = offset;
-				bd->bd_size = size;
-			} else if (verbose) {
-				warnx("cannot resolve '%s->%s' for probe %s",
-				    ba_name(bd->bd_base), bd->bd_field,
-				    dtpi->dtpi_func);
-			}
+			fill_deref_node(ba->ba_value, dtpi, dtrq);
 			break;
 		case B_AT_MAP:
 			if (ba->ba_key != NULL)
@@ -2669,8 +2748,8 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 		break;
 	case B_AT_FN_DEREF: {
 		struct bt_deref *bd = ba->ba_value;
-		int argn = bd->bd_base->ba_type - B_AT_BI_ARG0;
-		val = (long)dtev->dtev_mem[argn];
+		val = (bd->bd_slot != BD_SLOT_UNSET)
+		    ? (long)dtev->dtev_mem[bd->bd_slot] : 0;
 		break;
 	}
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
@@ -2846,8 +2925,9 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		break;
 	case B_AT_FN_DEREF: {
 		struct bt_deref *bd = ba->ba_value;
-		int argn = bd->bd_base->ba_type - B_AT_BI_ARG0;
-		snprintf(buf, sizeof(buf), "%ld", (long)dtev->dtev_mem[argn]);
+		uint64_t v = (bd->bd_slot != BD_SLOT_UNSET)
+		    ? dtev->dtev_mem[bd->bd_slot] : 0;
+		snprintf(buf, sizeof(buf), "%ld", (long)v);
 		str = buf;
 		break;
 	}
