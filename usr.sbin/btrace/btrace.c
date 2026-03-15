@@ -119,6 +119,7 @@ void			 fill_memcap(struct bt_stmt *, struct dtioc_probe_info *,
 int			 stmt_eval(struct bt_stmt *, struct dt_evt *);
 void			 stmt_bucketize(struct bt_stmt *, struct dt_evt *);
 void			 stmt_map_bucketize(struct bt_stmt *, struct dt_evt *);
+int			 stmt_map_foreach(struct bt_stmt *, struct dt_evt *);
 void			 stmt_clear(struct bt_stmt *);
 void			 stmt_delete(struct bt_stmt *, struct dt_evt *);
 void			 stmt_insert(struct bt_stmt *, struct dt_evt *);
@@ -615,6 +616,12 @@ rules_action_scan(struct bt_stmt *bs)
 				evtflags |= rules_action_scan(bc->bc_elsebs);
 			}
 			break;
+		case B_AC_FORMAP: {
+			struct bt_for *bfor = (struct bt_for *)bs->bs_var;
+			if (bfor != NULL)
+				evtflags |= rules_action_scan(bfor->bfor_body);
+			break;
+		}
 		default:
 			break;
 		}
@@ -689,6 +696,12 @@ rules_strargs_scan(struct bt_stmt *bs)
 				mask |= rules_strargs_scan(bc->bc_elsebs);
 			}
 			break;
+		case B_AC_FORMAP: {
+			struct bt_for *bfor = (struct bt_for *)bs->bs_var;
+			if (bfor != NULL)
+				mask |= rules_strargs_scan(bfor->bfor_body);
+			break;
+		}
 		default:
 			break;
 		}
@@ -794,6 +807,15 @@ rules_strlen_scan(struct bt_stmt *bs)
 					maxlen = l;
 			}
 			break;
+		case B_AC_FORMAP: {
+			struct bt_for *bfor = (struct bt_for *)bs->bs_var;
+			if (bfor != NULL) {
+				l = rules_strlen_scan(bfor->bfor_body);
+				if (l > maxlen)
+					maxlen = l;
+			}
+			break;
+		}
 		default:
 			break;
 		}
@@ -1531,6 +1553,12 @@ fill_memcap(struct bt_stmt *bs, struct dtioc_probe_info *dtpi,
 				fill_memcap(bc->bc_elsebs, dtpi, dtrq);
 			}
 			break;
+		case B_AC_FORMAP: {
+			struct bt_for *bfor = (struct bt_for *)bs->bs_var;
+			if (bfor != NULL)
+				fill_memcap(bfor->bfor_body, dtpi, dtrq);
+			break;
+		}
 		default:
 			break;
 		}
@@ -1555,6 +1583,8 @@ stmt_eval(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AC_MAPHIST:
 		stmt_map_bucketize(bs, dtev);
 		break;
+	case B_AC_FORMAP:
+		return stmt_map_foreach(bs, dtev);
 	case B_AC_CLEAR:
 		stmt_clear(bs);
 		break;
@@ -1683,6 +1713,82 @@ stmt_map_bucketize(struct bt_stmt *bs, struct dt_evt *dtev)
 
 	map_hist_bucket(map, mhash, bucket, step);
 	debug("maphist '%s'[%s] bucket '%s'\n", bv_name(bv), mhash, bucket);
+}
+
+/*
+ * Callback state for stmt_map_foreach.
+ */
+struct foreach_state {
+	struct bt_for	*fs_bfor;
+	struct dt_evt	*fs_dtev;
+	struct bt_arg	 fs_key_ba;	/* B_AT_STR: current entry's key */
+	struct bt_arg	 fs_tuple_ba;	/* B_AT_TUPLE: (key, value) pair */
+	int		 fs_halt;	/* non-zero if body called exit() */
+};
+
+static int
+foreach_cb(const char *key, struct bt_arg *val, void *arg)
+{
+	struct foreach_state *st = arg;
+	struct bt_stmt *body;
+
+	st->fs_key_ba.ba_value = (void *)key;
+	SLIST_NEXT(&st->fs_key_ba, ba_next) = val;
+
+	body = st->fs_bfor->bfor_body;
+	while (body != NULL) {
+		if (stmt_eval(body, st->fs_dtev)) {
+			st->fs_halt = 1;
+			return 1;	/* stop iteration */
+		}
+		body = SLIST_NEXT(body, bs_next);
+	}
+	return 0;
+}
+
+/*
+ * For-loop over a map:	{ for ($kv : @map) { } }
+ *
+ * Binds the loop variable to a (key, value) tuple for each map entry and
+ * executes the body.  $kv.0 is the key string; $kv.1 is the stored value.
+ * Returns non-zero if a body statement requested a halt (e.g. exit()).
+ */
+int
+stmt_map_foreach(struct bt_stmt *bs, struct dt_evt *dtev)
+{
+	struct bt_for *bfor = (struct bt_for *)bs->bs_var;
+	struct bt_arg *mapref = SLIST_FIRST(&bs->bs_args);
+	struct bt_var *mapvar = mapref->ba_value;
+	struct map *map;
+	struct foreach_state st;
+
+	assert(mapref->ba_type == B_AT_VAR);
+	assert(bfor != NULL);
+
+	map = (struct map *)mapvar->bv_value;
+	if (map == NULL || mapvar->bv_type != B_VT_MAP)
+		return 0;
+
+	/*
+	 * Build a reusable (key, value) tuple.
+	 * fs_key_ba:   B_AT_STR pointing at each entry's key string in turn.
+	 * fs_tuple_ba: B_AT_TUPLE with fs_key_ba as the element list head.
+	 * foreach_cb updates fs_key_ba.ba_value and ba_next per iteration.
+	 */
+	st.fs_bfor  = bfor;
+	st.fs_dtev  = dtev;
+	st.fs_halt  = 0;
+	st.fs_key_ba   = (struct bt_arg)BA_INITIALIZER(NULL, B_AT_STR);
+	st.fs_tuple_ba = (struct bt_arg)BA_INITIALIZER(&st.fs_key_ba, B_AT_TUPLE);
+
+	bfor->bfor_var->bv_value = &st.fs_tuple_ba;
+	bfor->bfor_var->bv_type  = B_VT_TUPLE;
+
+	map_foreach(map, foreach_cb, &st);
+
+	bfor->bfor_var->bv_value = NULL;
+	bfor->bfor_var->bv_type  = B_VT_LONG;
+	return st.fs_halt;
 }
 
 /*
@@ -2574,6 +2680,21 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_MF_STATS: {
 		struct avgstate *as = (struct avgstate *)ba->ba_value;
 		val = (as->count > 0) ? as->sum / as->count : 0;
+		break;
+	}
+	case B_AT_TMEMBER: {
+		unsigned long idx = (unsigned long)ba->ba_key;
+		struct bt_arg *elem;
+
+		bv = ba->ba_value;
+		if (bv->bv_value == NULL)
+			return 0;
+		elem = bv->bv_value;
+		assert(elem->ba_type == B_AT_TUPLE);
+		elem = elem->ba_value;
+		while (elem != NULL && idx-- > 0)
+			elem = SLIST_NEXT(elem, ba_next);
+		val = (elem != NULL) ? ba2long(elem, dtev) : 0;
 		break;
 	}
 	default:

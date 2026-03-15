@@ -217,6 +217,14 @@ struct bt_cond {
 };
 
 /*
+ * Represents a for-loop over a map: for ($kv : @map) { }
+ */
+struct bt_for {
+	struct bt_var		*bfor_var;	/* loop variable ($kv) */
+	struct bt_stmt		*bfor_body;	/* body executed per entry */
+};
+
+/*
  * Each action associated with a given probe is made of at least one
  * statement.
  *
@@ -232,6 +240,7 @@ struct bt_stmt {
 		B_AC_CLEAR,			/* clear(@map) */
 		B_AC_DELETE,			/* delete(@map[key]) */
 		B_AC_EXIT,			/* exit() */
+		B_AC_FORMAP,			/* for ($kv : @map) { } */
 		B_AC_INSERT,			/* @map[key] = 42 */
 		B_AC_MAPHIST,			/* @map[key] = hist(val) */
 		B_AC_PRINT,			/* print(@map, 10) */
