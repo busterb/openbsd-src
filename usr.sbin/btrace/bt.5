@@ -438,6 +438,20 @@ Both prefix and postfix forms are supported as statements;
 there is no difference in evaluation order.
 .Ar var
 may be a local variable, global scalar variable, or map entry.
+.It Ar cond Ic \&? Ar expr1 Ic \&: Ar expr2
+Ternary expression: evaluates
+.Ar cond ;
+if non-zero, the result is
+.Ar expr1 ,
+otherwise
+.Ar expr2 .
+May appear anywhere an expression is accepted, including as a
+.Fn printf
+argument, a map key, or the right-hand side of an assignment.
+The operator is right-associative:
+.Ar a Ic \&? Ar b Ic \&: Ar c Ic \&? Ar d Ic \&: Ar e
+is parsed as
+.Ar a Ic \&? Ar b Ic \&: Pq Ar c Ic \&? Ar d Ic \&: Ar e .
 .It "@map[key]" = Fn avg "value"
 Store the running average of all recorded values for
 .Va key .
