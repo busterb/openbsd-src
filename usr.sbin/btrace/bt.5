@@ -372,6 +372,54 @@ Evaluation is capped at 1024 iterations per event to prevent runaway
 loops from stalling the
 .Xr btrace 8
 process.
+.It Ar var Ic += Ar expr , Ar var Ic -= Ar expr , No ...
+Compound assignment:
+.Ar var
+.Ic op=
+.Ar expr
+is equivalent to
+.Ar var
+.Ic =
+.Ar var
+.Ic op
+.Ar expr .
+The operators
+.Ic += ,
+.Ic -= ,
+.Ic *= ,
+.Ic /= ,
+.Ic %= ,
+.Ic &= ,
+.Ic |= ,
+.Ic ^= ,
+.Ic <<= ,
+and
+.Ic >>=
+are supported.
+.Ar var
+may be a local variable
+.Pq Va $name ,
+a global scalar variable
+.Pq Va @name ,
+or a map entry
+.Pq Va @map[key] .
+.It Ar var Ic ++ , Ar var Ic -- , Ic ++ Ar var , Ic -- Ar var
+Increment or decrement
+.Ar var
+by one.
+Equivalent to
+.Ar var
+.Ic +=
+.Li 1
+and
+.Ar var
+.Ic -=
+.Li 1
+respectively.
+Both prefix and postfix forms are supported as statements;
+there is no difference in evaluation order.
+.Ar var
+may be a local variable, global scalar variable, or map entry.
 .It "@map[key]" = Fn avg "value"
 Store the running average of all recorded values for
 .Va key .

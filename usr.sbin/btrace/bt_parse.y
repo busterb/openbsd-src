@@ -87,6 +87,7 @@ struct bt_stmt	*bh_inc(const char *, struct bt_arg *, struct bt_arg *);
 struct bt_stmt	*bhm_inc(const char *, struct bt_arg *, struct bt_arg *, struct bt_arg *);
 struct bt_stmt	*bfor_new(const char *, const char *, struct bt_stmt *);
 struct bt_stmt	*bwhile_new(struct bt_arg *, struct bt_stmt *);
+struct bt_stmt	*bm_update(struct bt_arg *, struct bt_arg *);
 
 /*
  * Lexer
@@ -128,6 +129,9 @@ static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 
 %token	<v.i>		ERROR ENDFILT
 %token	<v.i>		OP_EQ OP_NE OP_LE OP_LT OP_GE OP_GT OP_LAND OP_LOR OP_SHL OP_SHR OP_ARROW
+%token	<v.i>		OP_PLUSEQ OP_MINUSEQ OP_MULTEQ OP_DIVEQ OP_MODEQ
+%token	<v.i>		OP_BANDEQ OP_BOREQ OP_XOREQ OP_SHLEQ OP_SHREQ
+%token	<v.i>		OP_INC OP_DEC
 /* Builtins */
 %token	<v.i>		BUILTIN BEGIN ELSE END FOR IF STR WHILE
 /* Functions and Map operators */
@@ -271,6 +275,49 @@ stmt	: ';' NL			{ $$ = NULL; }
 	| GVAR '=' OP4 '(' expr ',' vargs ')'	{ $$ = bh_inc($1, $5, $7); }
 	| GVAR '[' vargs ']' '=' OP1 '(' expr ')'		{ $$ = bhm_inc($1, $3, $8, NULL); }
 	| GVAR '[' vargs ']' '=' OP4 '(' expr ',' vargs ')'	{ $$ = bhm_inc($1, $3, $8, $10); }
+	/* compound assignment: local variables */
+	| LVAR OP_PLUSEQ  expr	{ $$ = bl_store($1, ba_op(B_AT_OP_PLUS,   bl_find($1), $3)); }
+	| LVAR OP_MINUSEQ expr	{ $$ = bl_store($1, ba_op(B_AT_OP_MINUS,  bl_find($1), $3)); }
+	| LVAR OP_MULTEQ  expr	{ $$ = bl_store($1, ba_op(B_AT_OP_MULT,   bl_find($1), $3)); }
+	| LVAR OP_DIVEQ   expr	{ $$ = bl_store($1, ba_op(B_AT_OP_DIVIDE, bl_find($1), $3)); }
+	| LVAR OP_MODEQ   expr	{ $$ = bl_store($1, ba_op(B_AT_OP_MODULO, bl_find($1), $3)); }
+	| LVAR OP_BANDEQ  expr	{ $$ = bl_store($1, ba_op(B_AT_OP_BAND,   bl_find($1), $3)); }
+	| LVAR OP_BOREQ   expr	{ $$ = bl_store($1, ba_op(B_AT_OP_BOR,    bl_find($1), $3)); }
+	| LVAR OP_XOREQ   expr	{ $$ = bl_store($1, ba_op(B_AT_OP_XOR,    bl_find($1), $3)); }
+	| LVAR OP_SHLEQ   expr	{ $$ = bl_store($1, ba_op(B_AT_OP_SHL,    bl_find($1), $3)); }
+	| LVAR OP_SHREQ   expr	{ $$ = bl_store($1, ba_op(B_AT_OP_SHR,    bl_find($1), $3)); }
+	| LVAR OP_INC		{ $$ = bl_store($1, ba_op(B_AT_OP_PLUS,   bl_find($1), ba_new(1L, B_AT_LONG))); }
+	| LVAR OP_DEC		{ $$ = bl_store($1, ba_op(B_AT_OP_MINUS,  bl_find($1), ba_new(1L, B_AT_LONG))); }
+	| OP_INC LVAR		{ $$ = bl_store($2, ba_op(B_AT_OP_PLUS,   bl_find($2), ba_new(1L, B_AT_LONG))); }
+	| OP_DEC LVAR		{ $$ = bl_store($2, ba_op(B_AT_OP_MINUS,  bl_find($2), ba_new(1L, B_AT_LONG))); }
+	/* compound assignment: global scalar variables */
+	| GVAR OP_PLUSEQ  expr	{ $$ = bg_store($1, ba_op(B_AT_OP_PLUS,   bg_find($1), $3)); }
+	| GVAR OP_MINUSEQ expr	{ $$ = bg_store($1, ba_op(B_AT_OP_MINUS,  bg_find($1), $3)); }
+	| GVAR OP_MULTEQ  expr	{ $$ = bg_store($1, ba_op(B_AT_OP_MULT,   bg_find($1), $3)); }
+	| GVAR OP_DIVEQ   expr	{ $$ = bg_store($1, ba_op(B_AT_OP_DIVIDE, bg_find($1), $3)); }
+	| GVAR OP_MODEQ   expr	{ $$ = bg_store($1, ba_op(B_AT_OP_MODULO, bg_find($1), $3)); }
+	| GVAR OP_BANDEQ  expr	{ $$ = bg_store($1, ba_op(B_AT_OP_BAND,   bg_find($1), $3)); }
+	| GVAR OP_BOREQ   expr	{ $$ = bg_store($1, ba_op(B_AT_OP_BOR,    bg_find($1), $3)); }
+	| GVAR OP_XOREQ   expr	{ $$ = bg_store($1, ba_op(B_AT_OP_XOR,    bg_find($1), $3)); }
+	| GVAR OP_SHLEQ   expr	{ $$ = bg_store($1, ba_op(B_AT_OP_SHL,    bg_find($1), $3)); }
+	| GVAR OP_SHREQ   expr	{ $$ = bg_store($1, ba_op(B_AT_OP_SHR,    bg_find($1), $3)); }
+	| GVAR OP_INC		{ $$ = bg_store($1, ba_op(B_AT_OP_PLUS,   bg_find($1), ba_new(1L, B_AT_LONG))); }
+	| GVAR OP_DEC		{ $$ = bg_store($1, ba_op(B_AT_OP_MINUS,  bg_find($1), ba_new(1L, B_AT_LONG))); }
+	| OP_INC GVAR		{ $$ = bg_store($2, ba_op(B_AT_OP_PLUS,   bg_find($2), ba_new(1L, B_AT_LONG))); }
+	| OP_DEC GVAR		{ $$ = bg_store($2, ba_op(B_AT_OP_MINUS,  bg_find($2), ba_new(1L, B_AT_LONG))); }
+	/* compound assignment: map entries (@map[key] op= expr; @map[key]++) */
+	| mentry OP_PLUSEQ  expr { $$ = bm_update($1, ba_op(B_AT_OP_PLUS,   $1, $3)); }
+	| mentry OP_MINUSEQ expr { $$ = bm_update($1, ba_op(B_AT_OP_MINUS,  $1, $3)); }
+	| mentry OP_MULTEQ  expr { $$ = bm_update($1, ba_op(B_AT_OP_MULT,   $1, $3)); }
+	| mentry OP_DIVEQ   expr { $$ = bm_update($1, ba_op(B_AT_OP_DIVIDE, $1, $3)); }
+	| mentry OP_MODEQ   expr { $$ = bm_update($1, ba_op(B_AT_OP_MODULO, $1, $3)); }
+	| mentry OP_BANDEQ  expr { $$ = bm_update($1, ba_op(B_AT_OP_BAND,   $1, $3)); }
+	| mentry OP_BOREQ   expr { $$ = bm_update($1, ba_op(B_AT_OP_BOR,    $1, $3)); }
+	| mentry OP_XOREQ   expr { $$ = bm_update($1, ba_op(B_AT_OP_XOR,    $1, $3)); }
+	| mentry OP_SHLEQ   expr { $$ = bm_update($1, ba_op(B_AT_OP_SHL,    $1, $3)); }
+	| mentry OP_SHREQ   expr { $$ = bm_update($1, ba_op(B_AT_OP_SHR,    $1, $3)); }
+	| mentry OP_INC		{ $$ = bm_update($1, ba_op(B_AT_OP_PLUS,   $1, ba_new(1L, B_AT_LONG))); }
+	| mentry OP_DEC		{ $$ = bm_update($1, ba_op(B_AT_OP_MINUS,  $1, ba_new(1L, B_AT_LONG))); }
 	;
 
 stmtblck: IF '(' expr ')' block			{ $$ = bt_new($3, $5, NULL); }
@@ -733,6 +780,23 @@ bm_find(const char *vname, struct bt_arg *mkey)
 }
 
 /*
+ * Create a map compound-assignment statement: @map[key] op= val.
+ * 'mentry' is a B_AT_MAP arg from bm_find(); 'mval' is the new computed value.
+ * A fresh B_AT_MAP arg is allocated for the write target so that the read
+ * reference inside 'mval' and the write target share var+key without aliasing
+ * the ba_next pointer (which ba_op modifies on the read side).
+ */
+struct bt_stmt *
+bm_update(struct bt_arg *mentry, struct bt_arg *mval)
+{
+	struct bt_arg *ba;
+
+	ba = ba_new(mentry->ba_value, B_AT_MAP);
+	ba->ba_key = mentry->ba_key;
+	return bs_new(B_AC_INSERT, ba, (struct bt_var *)mval);
+}
+
+/*
  * Histograms implemented using associative arrays (maps).  In the case
  * of linear histograms `ba_key' points to a list of (min, max, step)
  * necessary to "bucketize" any value.
@@ -1091,6 +1155,10 @@ again:
 	case '<':
 		if (peek() == '<') {
 			lgetc();
+			if (peek() == '=') {
+				lgetc();
+				return OP_SHLEQ;
+			}
 			return OP_SHL;
 		}
 		if (peek() == '=') {
@@ -1101,6 +1169,10 @@ again:
 	case '>':
 		if (peek() == '>') {
 			lgetc();
+			if (peek() == '=') {
+				lgetc();
+				return OP_SHREQ;
+			}
 			return OP_SHR;
 		}
 		if (peek() == '=') {
@@ -1108,6 +1180,36 @@ again:
 			return OP_GE;
 		}
 		return OP_GT;
+	case '+':
+		if (peek() == '+') {
+			lgetc();
+			return OP_INC;
+		}
+		if (peek() == '=') {
+			lgetc();
+			return OP_PLUSEQ;
+		}
+		return c;
+	case '*':
+		if (!pflag && peek() == '=') {
+			lgetc();
+			return OP_MULTEQ;
+		}
+		if (!pflag)
+			return c;
+		break;	/* pflag: let word-parser consume '*' as probe wildcard */
+	case '%':
+		if (peek() == '=') {
+			lgetc();
+			return OP_MODEQ;
+		}
+		return c;
+	case '^':
+		if (peek() == '=') {
+			lgetc();
+			return OP_XOREQ;
+		}
+		return c;
 	case '~':
 		return c;
 	case '&':
@@ -1115,20 +1217,40 @@ again:
 			lgetc();
 			return OP_LAND;
 		}
+		if (peek() == '=') {
+			lgetc();
+			return OP_BANDEQ;
+		}
 		return c;
 	case '|':
 		if (peek() == '|') {
 			lgetc();
 			return OP_LOR;
 		}
+		if (peek() == '=') {
+			lgetc();
+			return OP_BOREQ;
+		}
 		return c;
 	case '-':
+		if (peek() == '-') {
+			lgetc();
+			return OP_DEC;
+		}
 		if (peek() == '>') {
 			lgetc();
 			return OP_ARROW;
 		}
+		if (peek() == '=') {
+			lgetc();
+			return OP_MINUSEQ;
+		}
 		return c;
 	case '/':
+		if (peek() == '=') {
+			lgetc();
+			return OP_DIVEQ;
+		}
 		while (isspace(peek())) {
 			if (lgetc() == '\n') {
 				yylval.lineno++;
