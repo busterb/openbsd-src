@@ -2502,6 +2502,7 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AT_BI_RETVAL:
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 	case B_AT_FN_SIZEOF:
+	case B_AT_FN_STRNCMP:
 	case B_AT_FN_DEREF:
 	case B_AT_FN_SUBSCRIPT:
 	case B_AT_FN_CAST:
@@ -2688,6 +2689,7 @@ baeval(struct bt_arg *bval, struct dt_evt *dtev)
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 	case B_AT_BI_RETVAL:
 	case B_AT_FN_SIZEOF:
+	case B_AT_FN_STRNCMP:
 	case B_AT_FN_DEREF:
 	case B_AT_FN_SUBSCRIPT:
 	case B_AT_FN_CAST:
@@ -3013,6 +3015,8 @@ ba_name(struct bt_arg *ba)
 		return "ksym";
 	case B_AT_FN_USYM:
 		return "usym";
+	case B_AT_FN_STRNCMP:
+		return "strncmp";
 	case B_AT_FN_DEREF: {
 		static char buf[64];
 		struct bt_deref *bd = ba->ba_value;
@@ -3175,6 +3179,16 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 		/* Symbol names are strings; non-empty means true. */
 		val = (*ba2str(ba, dtev) != '\0') ? 1 : 0;
 		break;
+	case B_AT_FN_STRNCMP: {
+		char s1[STRLEN];
+		struct bt_arg *a1 = ba->ba_value;
+		struct bt_arg *a2 = SLIST_NEXT(a1, ba_next);
+		struct bt_arg *a3 = SLIST_NEXT(a2, ba_next);
+
+		strlcpy(s1, ba2str(a1, dtev), sizeof(s1));
+		val = strncmp(s1, ba2str(a2, dtev), (size_t)ba2long(a3, dtev));
+		break;
+	}
 	case B_AT_FN_SIZEOF: {
 		const char *tname = (const char *)ba->ba_value;
 		uint16_t typeid;
@@ -3405,6 +3419,7 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		break;
 	}
 	case B_AT_FN_SIZEOF:
+	case B_AT_FN_STRNCMP:
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		snprintf(buf, sizeof(buf), "%ld", ba2long(ba, dtev));
 		str = buf;
@@ -3528,6 +3543,14 @@ ba2flags(struct bt_arg *ba)
 		if (ba->ba_value != NULL)
 			flags |= ba2flags(ba->ba_value);
 		break;
+	case B_AT_FN_STRNCMP: {
+		struct bt_arg *a1 = ba->ba_value;
+		struct bt_arg *a2 = SLIST_NEXT(a1, ba_next);
+
+		flags |= ba2flags(a1);
+		flags |= ba2flags(a2);
+		break;
+	}
 	case B_AT_FN_DEREF:
 	case B_AT_FN_SUBSCRIPT:
 		/* We need the arg's register value (pointer) to dereference. */

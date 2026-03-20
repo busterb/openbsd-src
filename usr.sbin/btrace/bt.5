@@ -279,6 +279,22 @@ or
 .Ic enum
 prefix.
 If CTF data is unavailable or the type cannot be found, the value is 0.
+.It Fn strncmp "s1" "s2" "len"
+Compare the first
+.Ar len
+bytes of strings
+.Ar s1
+and
+.Ar s2 .
+Returns 0 if equal, a negative value if
+.Ar s1
+is less than
+.Ar s2 ,
+or a positive value if
+.Ar s1
+is greater than
+.Ar s2 .
+Useful in filter expressions.
 .It Fn str "expr" "[maxlen]"
 When
 .Va expr
