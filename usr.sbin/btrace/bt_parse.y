@@ -133,7 +133,7 @@ static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 %token	<v.i>		OP_BANDEQ OP_BOREQ OP_XOREQ OP_SHLEQ OP_SHREQ
 %token	<v.i>		OP_INC OP_DEC
 /* Builtins */
-%token	<v.i>		BUILTIN BEGIN ELSE END FOR IF STR WHILE
+%token	<v.i>		BUILTIN BEGIN BREAK CONTINUE ELSE END FOR IF STR WHILE
 /* Functions and Map operators */
 %token  <v.i>		F_DELETE F_PRINT
 %token	<v.i>		MFUNC FUNC0 FUNC1 FUNCN OP1 OP2 OP4 MOP0 MOP1
@@ -275,6 +275,8 @@ stmt	: ';' NL			{ $$ = NULL; }
 	| GVAR '=' OP4 '(' expr ',' vargs ')'	{ $$ = bh_inc($1, $5, $7); }
 	| GVAR '[' vargs ']' '=' OP1 '(' expr ')'		{ $$ = bhm_inc($1, $3, $8, NULL); }
 	| GVAR '[' vargs ']' '=' OP4 '(' expr ',' vargs ')'	{ $$ = bhm_inc($1, $3, $8, $10); }
+	| BREAK			{ $$ = bs_new(B_AC_BREAK, NULL, NULL); }
+	| CONTINUE		{ $$ = bs_new(B_AC_CONTINUE, NULL, NULL); }
 	/* compound assignment: local variables */
 	| LVAR OP_PLUSEQ  expr	{ $$ = bl_store($1, ba_op(B_AT_OP_PLUS,   bl_find($1), $3)); }
 	| LVAR OP_MINUSEQ expr	{ $$ = bl_store($1, ba_op(B_AT_OP_MINUS,  bl_find($1), $3)); }
@@ -1002,8 +1004,10 @@ lookup(char *s)
 		{ "arg8",	BUILTIN,	B_AT_BI_ARG8 },
 		{ "arg9",	BUILTIN,	B_AT_BI_ARG9 },
 		{ "avg",	MOP1,		B_AT_MF_AVG },
+		{ "break",	BREAK,		0 },
 		{ "clear",	MFUNC,		B_AC_CLEAR },
 		{ "comm",	BUILTIN,	B_AT_BI_COMM },
+		{ "continue",	CONTINUE,	0 },
 		{ "count",	MOP0, 		B_AT_MF_COUNT },
 		{ "cpu",	BUILTIN,	B_AT_BI_CPU },
 		{ "delete",	F_DELETE,	B_AC_DELETE },
