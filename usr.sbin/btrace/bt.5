@@ -472,6 +472,21 @@ When the map is printed, all three are displayed on one line.
 Store the sum of all recorded values for
 .Va key .
 .El
+.Pp
+Comments:
+.Bl -tag -width "/* ... */" -compact -offset indent
+.It Li //
+Line comment: everything from
+.Li //
+to the end of the line is ignored.
+.It Li /* No ... Ic */
+Block comment: everything between
+.Li /*
+and
+.Li */
+is ignored.
+Block comments may span multiple lines.
+.El
 .Sh EXAMPLES
 Working examples are installed in
 .Pa /usr/share/btrace/ :
