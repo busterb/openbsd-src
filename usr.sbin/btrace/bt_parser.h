@@ -161,6 +161,7 @@ struct bt_arg {
 		B_AT_FN_SIZEOF,			/* sizeof("struct proc") */
 		B_AT_FN_KSYM,			/* ksym(addr): kernel symbol name */
 		B_AT_FN_USYM,			/* usym(addr): userland symbol name */
+		B_AT_FN_LEN,			/* len(@map): number of map entries */
 		B_AT_FN_DEREF,			/* arg0->field: struct member deref */
 		B_AT_FN_SUBSCRIPT,		/* arg0[N]: array element read */
 

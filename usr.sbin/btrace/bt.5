@@ -255,6 +255,13 @@ entries in
 .It Fn printf "fmt" ...
 Print formatted string
 .Va fmt .
+.It Fn len "@map"
+Return the number of entries currently stored in
+.Ar @map .
+Returns 0 if the map is empty or has not been initialized.
+Only applies to keyed maps
+.Pq Va @map[key] ;
+scalar globals always return 0.
 .It Fn ksym "addr"
 Return the kernel symbol name corresponding to
 .Ar addr .

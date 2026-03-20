@@ -83,6 +83,17 @@ map_new(void)
 	return map;
 }
 
+size_t
+map_len(struct map *map)
+{
+	struct mentry *me;
+	size_t n = 0;
+
+	RB_FOREACH(me, map, map)
+		n++;
+	return n;
+}
+
 void
 map_clear(struct map *map)
 {
