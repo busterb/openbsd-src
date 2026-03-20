@@ -255,6 +255,21 @@ entries in
 .It Fn printf "fmt" ...
 Print formatted string
 .Va fmt .
+.It Fn ksym "addr"
+Return the kernel symbol name corresponding to
+.Ar addr .
+The address is looked up in the kernel symbol table loaded from
+.Pa /bsd .
+If no symbol is found at the exact address, the nearest symbol plus
+its offset is returned.
+If the symbol table is unavailable, the address is returned as a
+hexadecimal string.
+.It Fn usym "addr"
+Return the userland symbol name corresponding to
+.Ar addr
+in the process that triggered the probe.
+The shared library symbol tables are loaded on demand.
+If no symbol is found, the address is returned as a hexadecimal string.
 .It Fn sizeof "typename"
 Return the size in bytes of the named C type, using type information
 from CTF data in
