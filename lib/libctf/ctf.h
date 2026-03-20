@@ -48,6 +48,7 @@ uint16_t	 ctf_type_kind(ctf_file_t *, uint16_t);
 ssize_t		 ctf_type_size(ctf_file_t *, uint16_t);
 uint16_t	 ctf_type_reference(ctf_file_t *, uint16_t);
 uint32_t	 ctf_type_encoding(ctf_file_t *, uint16_t);
+uint16_t	 ctf_type_by_name(ctf_file_t *, const char *);
 
 /* Function signatures */
 int		 ctf_func_info(ctf_file_t *, const char *,
