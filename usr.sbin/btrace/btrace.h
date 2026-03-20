@@ -53,6 +53,7 @@ int			 kelf_snprintsym_kernel(struct syms *, char *, size_t,
 struct map;
 struct hist;
 struct map		*map_new(void);
+size_t			 map_len(struct map *);
 void			 map_clear(struct map *);
 void			 map_delete(struct map *, const char *);
 struct bt_arg		*map_get(struct map *, const char *);
