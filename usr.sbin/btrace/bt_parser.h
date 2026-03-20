@@ -190,6 +190,7 @@ struct bt_arg {
 		B_AT_OP_NEG,			/* -expr (unary) */
 		B_AT_OP_SHL,			/* << */
 		B_AT_OP_SHR,			/* >> */
+		B_AT_OP_TERN,			/* cond ? then : else */
 	}			 ba_type;
 };
 
@@ -237,6 +238,15 @@ struct bt_subscript {
 };
 
 #define BSS_SLOT_UNSET	0xff		/* bss_slot sentinel: not yet assigned */
+
+/*
+ * Ternary expression node: cond ? then : else.
+ */
+struct bt_ternary {
+	struct bt_arg		*btr_cond;	/* condition */
+	struct bt_arg		*btr_then;	/* value if true */
+	struct bt_arg		*btr_else;	/* value if false */
+};
 
 /*
  * Represents branches of an if-else statement.
@@ -303,6 +313,7 @@ int			 btparse(const char *, size_t, const char *, int);
 struct bt_arg		*ba_new0(void *, enum bt_argtype);
 struct bt_arg		*bd_new(struct bt_arg *, const char *);
 struct bt_arg		*bsub_new(struct bt_arg *, long);
+struct bt_arg		*btern_new(struct bt_arg *, struct bt_arg *, struct bt_arg *);
 
 const char		*bv_name(struct bt_var *);
 
