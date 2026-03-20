@@ -255,6 +255,18 @@ entries in
 .It Fn printf "fmt" ...
 Print formatted string
 .Va fmt .
+.It Fn sizeof "typename"
+Return the size in bytes of the named C type, using type information
+from CTF data in
+.Pa /bsd .
+.Ar typename
+is a quoted string and may include a
+.Ic struct ,
+.Ic union ,
+or
+.Ic enum
+prefix.
+If CTF data is unavailable or the type cannot be found, the value is 0.
 .It Fn str "expr" "[maxlen]"
 When
 .Va expr

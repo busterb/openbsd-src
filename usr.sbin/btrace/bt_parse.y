@@ -136,7 +136,7 @@ static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 %token	<v.i>		OP_BANDEQ OP_BOREQ OP_XOREQ OP_SHLEQ OP_SHREQ
 %token	<v.i>		OP_INC OP_DEC
 /* Builtins */
-%token	<v.i>		BUILTIN BEGIN BREAK CONTINUE ELSE END FOR IF STR WHILE
+%token	<v.i>		BUILTIN BEGIN BREAK CONTINUE ELSE END FOR IF SIZEOF STR WHILE
 /* Functions and Map operators */
 %token  <v.i>		F_DELETE F_PRINT
 %token	<v.i>		MFUNC FUNC0 FUNC1 FUNCN OP1 OP2 OP4 MOP0 MOP1
@@ -252,6 +252,7 @@ factor : '(' expr ')'		{ $$ = $2; }
 
 func	: STR '(' factor ')'		{ $$ = ba_new($3, B_AT_FN_STR); }
 	| STR '(' factor ',' expr ')'	{ $$ = ba_op(B_AT_FN_STR, $3, $5); }
+	| SIZEOF '(' CSTRING ')'	{ $$ = ba_new($3, B_AT_FN_SIZEOF); }
 	;
 
 vargs	: expr
@@ -1052,6 +1053,7 @@ lookup(char *s)
 		{ "probe",	BUILTIN,	B_AT_BI_PROBE },
 		{ "retval",	BUILTIN,	B_AT_BI_RETVAL },
 		{ "stats",	MOP1,		B_AT_MF_STATS },
+		{ "sizeof",	SIZEOF,		B_AT_FN_SIZEOF },
 		{ "str",	STR,		B_AT_FN_STR },
 		{ "sum",	MOP1,		B_AT_MF_SUM },
 		{ "tid",	BUILTIN,	B_AT_BI_TID },
