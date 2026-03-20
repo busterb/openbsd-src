@@ -88,6 +88,7 @@ struct bt_stmt	*bhm_inc(const char *, struct bt_arg *, struct bt_arg *, struct b
 struct bt_stmt	*bfor_new(const char *, const char *, struct bt_stmt *);
 struct bt_stmt	*bwhile_new(struct bt_arg *, struct bt_stmt *);
 struct bt_stmt	*bm_update(struct bt_arg *, struct bt_arg *);
+struct bt_arg	*btern_new(struct bt_arg *, struct bt_arg *, struct bt_arg *);
 
 /*
  * Lexer
@@ -125,7 +126,9 @@ static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
  * mentry : GVAR '[' vargs ']' over variable : GVAR -> factor '[' NUMBER ']'.
  * This is correct: @map[key] is always a map access, not a subscript.
  */
-%expect 2
+%expect 4
+
+%right '?' ':'		/* ternary operator, lowest expression precedence */
 
 %token	<v.i>		ERROR ENDFILT
 %token	<v.i>		OP_EQ OP_NE OP_LE OP_LT OP_GE OP_GT OP_LAND OP_LOR OP_SHL OP_SHR OP_ARROW
@@ -187,13 +190,15 @@ filter	: /* empty */			{ $$ = NULL; }
 
 /*
  * Operator precedence (lowest to highest):
+ *  0. ? : (ternary, lowest)
  *  1. &&, ||
  *  2. ==, !=, <, <=, >=, >
  *  3. +, -, &, ^, |, <<, >>
  *  4. *, /, %
  *  5. unary !, ~, - (highest)
  */
-expr	: expr OP_LAND term	{ $$ = ba_op(B_AT_OP_LAND, $1, $3); }
+expr	: expr '?' expr ':' expr	{ $$ = btern_new($1, $3, $5); }
+	| expr OP_LAND term	{ $$ = ba_op(B_AT_OP_LAND, $1, $3); }
 	| expr OP_LOR term	{ $$ = ba_op(B_AT_OP_LOR, $1, $3); }
 	| term
 	;
@@ -957,6 +962,24 @@ bsub_new(struct bt_arg *base, long index)
 }
 
 /*
+ * Ternary expression: cond ? then : else
+ */
+struct bt_arg *
+btern_new(struct bt_arg *cond, struct bt_arg *then_ba, struct bt_arg *else_ba)
+{
+	struct bt_ternary *btr;
+
+	btr = calloc(1, sizeof(*btr));
+	if (btr == NULL)
+		err(1, "bt_ternary: calloc");
+	btr->btr_cond = cond;
+	btr->btr_then = then_ba;
+	btr->btr_else = else_ba;
+
+	return ba_new(btr, B_AT_OP_TERN);
+}
+
+/*
  * While-loop: while (expr) { body }
  */
 struct bt_stmt *
@@ -1216,6 +1239,10 @@ again:
 		return c;
 	case '~':
 		return c;
+	case '?':
+		if (!pflag)
+			return c;
+		break;	/* pflag: let word-parser consume '?' as probe wildcard */
 	case '&':
 		if (peek() == '&') {
 			lgetc();
