@@ -51,6 +51,12 @@
 #define MINIMUM(a, b)	(((a) < (b)) ? (a) : (b))
 #define MAXIMUM(a, b)	(((a) > (b)) ? (a) : (b))
 
+/* stmt_eval() return codes */
+#define STMT_NORMAL	0	/* normal completion */
+#define STMT_EXIT	1	/* exit() was called */
+#define STMT_BREAK	2	/* break statement */
+#define STMT_CONT	3	/* continue statement */
+
 /* Per-key state for avg() and stats() aggregations. */
 struct avgstate {
 	long		 count;
@@ -1111,8 +1117,11 @@ rule_eval(struct bt_rule *r, struct dt_evt *dtev)
 	}
 
 	SLIST_FOREACH(bs, &r->br_action, bs_next) {
-		if (stmt_eval(bs, dtev))
+		int rc = stmt_eval(bs, dtev);
+		if (rc == STMT_EXIT)
 			return 1;
+		if (rc != STMT_NORMAL)
+			break;	/* break/continue outside a loop: stop action */
 	}
 
 	return 0;
@@ -1849,9 +1858,13 @@ stmt_eval(struct bt_stmt *bs, struct dt_evt *dtev)
 	int halt = 0;
 
 	switch (bs->bs_act) {
+	case B_AC_BREAK:
+		return STMT_BREAK;
 	case B_AC_BUCKETIZE:
 		stmt_bucketize(bs, dtev);
 		break;
+	case B_AC_CONTINUE:
+		return STMT_CONT;
 	case B_AC_MAPHIST:
 		stmt_map_bucketize(bs, dtev);
 		break;
@@ -1878,7 +1891,9 @@ stmt_eval(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AC_STORE:
 		stmt_store(bs, dtev);
 		break;
-	case B_AC_TEST:
+	case B_AC_TEST: {
+		int rc;
+
 		bc = (struct bt_cond *)bs->bs_var;
 		if (stmt_test(bs, dtev) == true)
 			bbs = bc->bc_condbs;
@@ -1886,28 +1901,36 @@ stmt_eval(struct bt_stmt *bs, struct dt_evt *dtev)
 			bbs = bc->bc_elsebs;
 
 		while (bbs != NULL) {
-			if (stmt_eval(bbs, dtev))
-				return 1;
+			rc = stmt_eval(bbs, dtev);
+			if (rc != STMT_NORMAL)
+				return rc;
 			bbs = SLIST_NEXT(bbs, bs_next);
 		}
 		break;
+	}
 	case B_AC_TIME:
 		stmt_time(bs, dtev);
 		break;
 	case B_AC_WHILE: {
 		struct bt_while *bwh = (struct bt_while *)bs->bs_var;
-		int iters = 0;
+		int iters = 0, rc;
 
 		while (stmt_test(bs, dtev)) {
 			bbs = bwh->bwh_body;
 			while (bbs != NULL) {
-				if (stmt_eval(bbs, dtev))
-					return 1;
+				rc = stmt_eval(bbs, dtev);
+				if (rc == STMT_EXIT)
+					return STMT_EXIT;
+				if (rc == STMT_BREAK)
+					goto while_done;
+				if (rc == STMT_CONT)
+					break;	/* restart condition check */
 				bbs = SLIST_NEXT(bbs, bs_next);
 			}
 			if (++iters >= 1024)
 				break;
 		}
+	while_done:
 		break;
 	}
 	case B_AC_ZERO:
@@ -2025,10 +2048,15 @@ foreach_cb(const char *key, struct bt_arg *val, void *arg)
 
 	body = st->fs_bfor->bfor_body;
 	while (body != NULL) {
-		if (stmt_eval(body, st->fs_dtev)) {
-			st->fs_halt = 1;
+		int rc = stmt_eval(body, st->fs_dtev);
+		if (rc == STMT_EXIT) {
+			st->fs_halt = STMT_EXIT;
 			return 1;	/* stop iteration */
 		}
+		if (rc == STMT_BREAK)
+			return 1;	/* stop iteration; fs_halt stays 0 */
+		if (rc == STMT_CONT)
+			return 0;	/* skip remaining body; go to next entry */
 		body = SLIST_NEXT(body, bs_next);
 	}
 	return 0;

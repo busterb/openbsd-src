@@ -266,8 +266,10 @@ struct bt_stmt {
 	struct bt_var		*bs_var;	/* for STOREs */
 	SLIST_HEAD(, bt_arg)	 bs_args;
 	enum bt_action {
+		B_AC_BREAK,			/* break */
 		B_AC_BUCKETIZE,			/* @h = hist(42) */
 		B_AC_CLEAR,			/* clear(@map) */
+		B_AC_CONTINUE,			/* continue */
 		B_AC_DELETE,			/* delete(@map[key]) */
 		B_AC_EXIT,			/* exit() */
 		B_AC_FORMAP,			/* for ($kv : @map) { } */

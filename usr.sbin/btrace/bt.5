@@ -370,6 +370,24 @@ Evaluation is capped at 1024 iterations per event to prevent runaway
 loops from stalling the
 .Xr btrace 8
 process.
+.It Ic break
+Exit the innermost enclosing
+.Ic while
+or
+.Ic for
+loop immediately.
+.It Ic continue
+Skip the remainder of the current loop body and proceed to the next
+iteration of the innermost enclosing
+.Ic while
+or
+.Ic for
+loop.
+For a
+.Ic while
+loop the condition is re-evaluated; for a
+.Ic for
+loop the next map entry is processed.
 .It "@map[key]" = Fn avg "value"
 Store the running average of all recorded values for
 .Va key .
