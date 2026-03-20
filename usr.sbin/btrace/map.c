@@ -33,7 +33,10 @@
 #include "bt_parser.h"
 #include "btrace.h"
 
-RB_HEAD(map, mentry);
+struct map {
+	struct mentry		*rbh_root;	/* RB_HEAD(map, mentry) */
+	size_t			 nentries;
+};
 
 struct mentry {
 	RB_ENTRY(mentry)	 mlink;
@@ -66,6 +69,7 @@ mget(struct map *map, const char *key)
 
 		strlcpy(mep->mkey, key, KLEN);
 		RB_INSERT(map, map, mep);
+		map->nentries++;
 	}
 
 	return mep;
@@ -86,12 +90,7 @@ map_new(void)
 size_t
 map_len(struct map *map)
 {
-	struct mentry *me;
-	size_t n = 0;
-
-	RB_FOREACH(me, map, map)
-		n++;
-	return n;
+	return map->nentries;
 }
 
 void
@@ -118,6 +117,7 @@ map_delete(struct map *map, const char *key)
 	if (mep != NULL) {
 		RB_REMOVE(map, map, mep);
 		free(mep);
+		map->nentries--;
 	}
 }
 
