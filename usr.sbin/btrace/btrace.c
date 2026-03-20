@@ -2331,7 +2331,7 @@ stmt_print(struct bt_stmt *bs, struct dt_evt *dtev)
 		map_hist_print(map, bv_name(bv));
 		bv->bv_printed = 1;
 	} else
-		printf("%s\n", ba2str(ba, dtev));
+		printf("@%s: %s\n", bv_name(bv), ba2str(ba, dtev));
 }
 
 /*
