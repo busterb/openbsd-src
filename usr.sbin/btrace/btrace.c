@@ -682,6 +682,13 @@ ba2strargs(struct bt_arg *ba)
 			if (ba->ba_value != NULL)
 				mask |= ba2strargs(ba->ba_value);
 			break;
+		case B_AT_OP_TERN: {
+			struct bt_ternary *btr = ba->ba_value;
+			mask |= ba2strargs(btr->btr_cond);
+			mask |= ba2strargs(btr->btr_then);
+			mask |= ba2strargs(btr->btr_else);
+			break;
+		}
 		default:
 			break;
 		}
@@ -790,6 +797,14 @@ ba_strlen(struct bt_arg *ba)
 					maxlen = l;
 			}
 			break;
+		case B_AT_OP_TERN: {
+			struct bt_ternary *btr = ba->ba_value;
+			l = ba_strlen(btr->btr_then);
+			if (l > maxlen) maxlen = l;
+			l = ba_strlen(btr->btr_else);
+			if (l > maxlen) maxlen = l;
+			break;
+		}
 		default:
 			break;
 		}
@@ -1801,6 +1816,13 @@ ba_fill_deref(struct bt_arg *ba, struct dtioc_probe_info *dtpi,
 			if (ba->ba_value != NULL)
 				ba_fill_deref(ba->ba_value, dtpi, dtrq);
 			break;
+		case B_AT_OP_TERN: {
+			struct bt_ternary *btr = ba->ba_value;
+			ba_fill_deref(btr->btr_cond, dtpi, dtrq);
+			ba_fill_deref(btr->btr_then, dtpi, dtrq);
+			ba_fill_deref(btr->btr_else, dtpi, dtrq);
+			break;
+		}
 		default:
 			break;
 		}
@@ -2373,6 +2395,13 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 		bv->bv_value = baeval(ba, dtev);
 		bv->bv_type = B_VT_LONG;
 		break;
+	case B_AT_OP_TERN: {
+		struct bt_arg *result = baeval(ba, dtev);
+		bv->bv_value = result;
+		bv->bv_type = (result->ba_type == B_AT_STR) ? B_VT_STR :
+		    B_VT_LONG;
+		break;
+	}
 	case B_AT_BI_COMM:
 	case B_AT_BI_KSTACK:
 	case B_AT_BI_USTACK:
@@ -2547,6 +2576,12 @@ baeval(struct bt_arg *bval, struct dt_evt *dtev)
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		ba = ba_new(ba2long(bval, dtev), B_AT_LONG);
 		break;
+	case B_AT_OP_TERN: {
+		struct bt_ternary *btr = bval->ba_value;
+		ba = baeval(ba2long(btr->btr_cond, dtev)
+		    ? btr->btr_then : btr->btr_else, dtev);
+		break;
+	}
 	case B_AT_STR:
 	case B_AT_BI_COMM:
 	case B_AT_BI_KSTACK:
@@ -2908,6 +2943,8 @@ ba_name(struct bt_arg *ba)
 		return "<<";
 	case B_AT_OP_SHR:
 		return ">>";
+	case B_AT_OP_TERN:
+		return "?:";
 	default:
 		xabort("unsupported type %d", ba->ba_type);
 	}
@@ -3011,6 +3048,12 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 		struct bt_subscript *bss = ba->ba_value;
 		val = (bss->bss_slot != BSS_SLOT_UNSET)
 		    ? (long)dtev->dtev_mem[bss->bss_slot] : 0;
+		break;
+	}
+	case B_AT_OP_TERN: {
+		struct bt_ternary *btr = ba->ba_value;
+		val = ba2long(ba2long(btr->btr_cond, dtev)
+		    ? btr->btr_then : btr->btr_else, dtev);
 		break;
 	}
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
@@ -3204,6 +3247,12 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		snprintf(buf, sizeof(buf), "%ld", ba2long(ba, dtev));
 		str = buf;
 		break;
+	case B_AT_OP_TERN: {
+		struct bt_ternary *btr = ba->ba_value;
+		str = ba2str(ba2long(btr->btr_cond, dtev)
+		    ? btr->btr_then : btr->btr_else, dtev);
+		break;
+	}
 	case B_AT_MF_COUNT:
 	case B_AT_MF_MAX:
 	case B_AT_MF_MIN:
@@ -3297,6 +3346,13 @@ ba2flags(struct bt_arg *ba)
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		flags |= ba2dtflags(ba->ba_value);
 		break;
+	case B_AT_OP_TERN: {
+		struct bt_ternary *btr = ba->ba_value;
+		flags |= ba2flags(btr->btr_cond);
+		flags |= ba2flags(btr->btr_then);
+		flags |= ba2flags(btr->btr_else);
+		break;
+	}
 	default:
 		xabort("invalid argument type %d", ba->ba_type);
 	}
