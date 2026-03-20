@@ -2415,6 +2415,8 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AT_BI_USTACK:
 	case B_AT_BI_PROBE:
 	case B_AT_FN_STR:
+	case B_AT_FN_KSYM:
+	case B_AT_FN_USYM:
 		bv->bv_value = baeval(ba, dtev);
 		bv->bv_type = B_VT_STR;
 		break;
@@ -2605,6 +2607,8 @@ baeval(struct bt_arg *bval, struct dt_evt *dtev)
 	case B_AT_BI_USTACK:
 	case B_AT_BI_PROBE:
 	case B_AT_FN_STR:
+	case B_AT_FN_KSYM:
+	case B_AT_FN_USYM:
 		ba = ba_new(ba2str(bval, dtev), B_AT_STR);
 		break;
 	case B_AT_TUPLE:
@@ -2906,6 +2910,10 @@ ba_name(struct bt_arg *ba)
 		return "str";
 	case B_AT_FN_SIZEOF:
 		return "sizeof";
+	case B_AT_FN_KSYM:
+		return "ksym";
+	case B_AT_FN_USYM:
+		return "usym";
 	case B_AT_FN_DEREF: {
 		static char buf[64];
 		struct bt_deref *bd = ba->ba_value;
@@ -3056,6 +3064,11 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 		break;
 	case B_AT_BI_PROBE:
 		val = dtev->dtev_pbn;
+		break;
+	case B_AT_FN_KSYM:
+	case B_AT_FN_USYM:
+		/* Symbol names are strings; non-empty means true. */
+		val = (*ba2str(ba, dtev) != '\0') ? 1 : 0;
 		break;
 	case B_AT_FN_SIZEOF: {
 		const char *tname = (const char *)ba->ba_value;
@@ -3281,6 +3294,25 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		snprintf(buf, sizeof(buf), "%ld", ba2long(ba, dtev));
 		str = buf;
 		break;
+	case B_AT_FN_KSYM: {
+		unsigned long addr = (unsigned long)ba2long(ba->ba_value, dtev);
+		if (kelf != NULL)
+			kelf_snprintsym_kernel(kelf, buf, sizeof(buf), addr);
+		else
+			snprintf(buf, sizeof(buf), "\n0x%lx", addr);
+		str = buf + 1;	/* skip leading '\n' */
+		break;
+	}
+	case B_AT_FN_USYM: {
+		unsigned long addr = (unsigned long)ba2long(ba->ba_value, dtev);
+		if (dtev != NULL)
+			kelf_snprintsym_proc(dtfd, dtev->dtev_pid, buf,
+			    sizeof(buf), addr);
+		else
+			snprintf(buf, sizeof(buf), "\n0x%lx", addr);
+		str = buf + 1;	/* skip leading '\n' */
+		break;
+	}
 	case B_AT_OP_TERN: {
 		struct bt_ternary *btr = ba->ba_value;
 		str = ba2str(ba2long(btr->btr_cond, dtev)
@@ -3374,6 +3406,12 @@ ba2flags(struct bt_arg *ba)
 	}
 	case B_AT_FN_SIZEOF:
 		/* sizeof is a compile-time constant; no kernel data needed. */
+		break;
+	case B_AT_FN_KSYM:
+	case B_AT_FN_USYM:
+		/* The address argument may require kernel data. */
+		if (ba->ba_value != NULL)
+			flags |= ba2flags(ba->ba_value);
 		break;
 	case B_AT_FN_DEREF:
 	case B_AT_FN_SUBSCRIPT:
