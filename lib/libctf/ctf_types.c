@@ -20,6 +20,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "ctf.h"
 #include "ctf_impl.h"
@@ -34,6 +35,55 @@ ctf_type_name(ctf_file_t *cf, uint16_t id)
 		return NULL;
 
 	return ctf_stroff2name(cf, ctt->ctt_name);
+}
+
+/*
+ * Look up a type by name, returning its ID, or 0 if not found.
+ * Supports "struct foo", "union foo", "enum foo" prefixes to restrict
+ * the match to the named kind; otherwise the first type with a matching
+ * name is returned.
+ */
+uint16_t
+ctf_type_by_name(ctf_file_t *cf, const char *name)
+{
+	uint32_t	 offset = cf->cth.cth_typeoff;
+	uint16_t	 idx = 1;
+	uint16_t	 filter = 0;	/* 0 = no kind filter */
+	const char	*lookup = name;
+
+	if (strncmp(name, "struct ", 7) == 0) {
+		lookup = name + 7;
+		filter = CTF_K_STRUCT;
+	} else if (strncmp(name, "union ", 6) == 0) {
+		lookup = name + 6;
+		filter = CTF_K_UNION;
+	} else if (strncmp(name, "enum ", 5) == 0) {
+		lookup = name + 5;
+		filter = CTF_K_ENUM;
+	}
+
+	while (offset < cf->cth.cth_stroff) {
+		const struct ctf_type	*ctt;
+		const char		*tname;
+		uint32_t		 toff;
+		uint16_t		 kind;
+
+		ctt = (const struct ctf_type *)(cf->data + offset);
+		tname = ctf_stroff2name(cf, ctt->ctt_name);
+		kind = CTF_INFO_KIND(ctt->ctt_info);
+		if (tname != NULL && strcmp(tname, lookup) == 0) {
+			if (filter == 0 || kind == filter)
+				return idx;
+		}
+
+		toff = ctf_type_len(cf, ctt);
+		if (toff == 0)
+			break;
+		offset += toff;
+		idx++;
+	}
+
+	return 0;
 }
 
 uint16_t
