@@ -158,6 +158,7 @@ struct bt_arg {
 		B_AT_BI_PROBE,
 
 		B_AT_FN_STR,			/* str(arg0); str($1, 3); */
+		B_AT_FN_SIZEOF,			/* sizeof("struct proc") */
 		B_AT_FN_DEREF,			/* arg0->field: struct member deref */
 		B_AT_FN_SUBSCRIPT,		/* arg0[N]: array element read */
 
