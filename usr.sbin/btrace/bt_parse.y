@@ -150,6 +150,7 @@ static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 %type	<v.stmt>	action stmt stmtblck stmtlist block
 %type	<v.arg>		vargs mentry mpat pargs
 %type	<v.arg>		expr term fterm uterm variable factor func
+%type	<v.string>	typename
 %%
 
 grammar	: /* empty */
@@ -252,7 +253,7 @@ factor : '(' expr ')'		{ $$ = $2; }
 
 func	: STR '(' factor ')'		{ $$ = ba_new($3, B_AT_FN_STR); }
 	| STR '(' factor ',' expr ')'	{ $$ = ba_op(B_AT_FN_STR, $3, $5); }
-	| SIZEOF '(' CSTRING ')'	{ $$ = ba_new($3, B_AT_FN_SIZEOF); }
+	| SIZEOF '(' typename ')'	{ $$ = ba_new($3, B_AT_FN_SIZEOF); }
 	| KSYM '(' expr ')'		{ $$ = ba_new($3, B_AT_FN_KSYM); }
 	| USYM '(' expr ')'		{ $$ = ba_new($3, B_AT_FN_USYM); }
 	| LEN '(' variable ')'		{ $$ = ba_new($3, B_AT_FN_LEN); }
@@ -260,6 +261,17 @@ func	: STR '(' factor ')'		{ $$ = ba_new($3, B_AT_FN_STR); }
 	| NTOP '(' expr ',' expr ')'	{ $$ = ba_new(ba_append($3, $5), B_AT_FN_NTOP); }
 	| STRNCMP '(' expr ',' expr ',' expr ')'
 					{ $$ = ba_new(ba_append(ba_append($3, $5), $7), B_AT_FN_STRNCMP); }
+	;
+
+typename : STRING			{ $$ = $1; }
+	| STRING STRING			{
+		size_t len = strlen($1) + 1 + strlen($2) + 1;
+		char *s = calloc(len, 1);
+		if (s == NULL)
+			err(1, NULL);
+		snprintf(s, len, "%s %s", $1, $2);
+		$$ = s;
+	}
 	;
 
 vargs	: expr
