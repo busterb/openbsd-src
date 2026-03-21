@@ -160,7 +160,7 @@ struct bt_arg {
 		B_AT_BI_PROBE,
 
 		B_AT_FN_STR,			/* str(arg0); str($1, 3); */
-		B_AT_FN_SIZEOF,			/* sizeof("struct proc") */
+		B_AT_FN_SIZEOF,			/* sizeof(struct proc) */
 		B_AT_FN_KSYM,			/* ksym(addr): kernel symbol name */
 		B_AT_FN_USYM,			/* usym(addr): userland symbol name */
 		B_AT_FN_LEN,			/* len(@map): number of map entries */
