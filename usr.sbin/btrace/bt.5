@@ -262,6 +262,23 @@ Returns 0 if the map is empty or has not been initialized.
 Only applies to keyed maps
 .Pq Va @map[key] ;
 scalar globals always return 0.
+.It Fn ntop "[af]" "addr"
+Return the string representation of an IP address.
+.Ar addr
+is a 32-bit integer in network byte order.
+The optional
+.Ar af
+argument specifies the address family
+.Pq Dv AF_INET No or Dv AF_INET6 ;
+if omitted,
+.Dv AF_INET
+is assumed.
+.Dv AF_INET
+and
+.Dv AF_INET6
+may be used as named constants in
+.Nm
+scripts.
 .It Fn ksym "addr"
 Return the kernel symbol name corresponding to
 .Ar addr .
