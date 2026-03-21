@@ -120,6 +120,8 @@ uint16_t		 ba2strargs(struct bt_arg *);
 uint16_t		 rules_strargs_scan(struct bt_stmt *);
 uint16_t		 ba_strlen(struct bt_arg *);
 uint16_t		 rules_strlen_scan(struct bt_stmt *);
+static int		 ctf_named_struct_field(const char *, const char *,
+			     uint32_t *, uint16_t *, uint16_t *);
 static int		 ctf_deref_field(uint16_t, const char *,
 			     uint32_t *, uint16_t *, uint16_t *);
 int			 ctf_resolve_deref(const char *, int, const char *,
@@ -1448,6 +1450,61 @@ deref_member_cb(const char *name, uint16_t typeid, unsigned long offset_bits,
 }
 
 /*
+ * Resolve the byte offset and size of `field' in a named struct/union type.
+ * `typename' is a CTF type name like "struct sockaddr_in".
+ * Optionally returns the CTF type ID of the field in `*field_typeidp'.
+ * Returns 0 on success, -1 if CTF data is unavailable or resolution fails.
+ */
+static int
+ctf_named_struct_field(const char *typename, const char *field,
+    uint32_t *offsetp, uint16_t *sizep, uint16_t *field_typeidp)
+{
+	uint16_t typeid, kind;
+	struct deref_info info;
+	int depth;
+
+	if (ctf_handle == NULL)
+		return -1;
+
+	typeid = ctf_type_by_name(ctf_handle, typename);
+	if (typeid == 0)
+		return -1;
+
+	/* Resolve typedefs/qualifiers to reach the struct/union kind. */
+	for (depth = 0; depth < 16; depth++) {
+		kind = ctf_type_kind(ctf_handle, typeid);
+		switch (kind) {
+		case CTF_K_TYPEDEF:
+		case CTF_K_VOLATILE:
+		case CTF_K_CONST:
+		case CTF_K_RESTRICT:
+			typeid = ctf_type_reference(ctf_handle, typeid);
+			if (typeid == 0)
+				return -1;
+			continue;
+		default:
+			break;
+		}
+		break;
+	}
+
+	if (kind != CTF_K_STRUCT && kind != CTF_K_UNION)
+		return -1;
+
+	memset(&info, 0, sizeof(info));
+	info.field = field;
+	ctf_member_iter(ctf_handle, typeid, deref_member_cb, &info);
+	if (!info.found)
+		return -1;
+
+	*offsetp = info.offset;
+	*sizep = info.size;
+	if (field_typeidp != NULL)
+		*field_typeidp = info.typeid;
+	return 0;
+}
+
+/*
  * Resolve the byte offset and size of `field' in the struct pointed to
  * by the pointer type `ptr_typeid'.  Optionally returns the CTF type ID
  * of the field in `*field_typeidp' for use in chained dereferences.
@@ -1615,6 +1672,48 @@ fill_deref_node(struct bt_deref *bd, struct dtioc_probe_info *dtpi,
 		slot = dtrq->dtrq_nmemcap++;
 		dtrq->dtrq_memcap[slot].dtrmc_argn = (uint8_t)inner_slot;
 		dtrq->dtrq_memcap[slot].dtrmc_flags = DTMC_FL_MEMBASE;
+		dtrq->dtrq_memcap[slot].dtrmc_offset = (int32_t)offset;
+		dtrq->dtrq_memcap[slot].dtrmc_size = size;
+	} else if (bd->bd_base->ba_type == B_AT_FN_CAST) {
+		/* Base is a cast: resolve field from the named struct type. */
+		struct bt_cast *bca = bd->bd_base->ba_value;
+		struct bt_arg *inner = bca->bca_expr;
+
+		if (ctf_named_struct_field(bca->bca_type, bd->bd_field,
+		    &offset, &size, &bd->bd_typeid) != 0) {
+			if (verbose)
+				warnx("cannot resolve '(%s *)->%s' for probe %s",
+				    bca->bca_type, bd->bd_field, dtpi->dtpi_func);
+			return -1;
+		}
+		slot = dtrq->dtrq_nmemcap++;
+		if (inner->ba_type >= B_AT_BI_ARG0 &&
+		    inner->ba_type <= B_AT_BI_ARG9) {
+			dtrq->dtrq_memcap[slot].dtrmc_argn =
+			    (uint8_t)(inner->ba_type - B_AT_BI_ARG0);
+			dtrq->dtrq_memcap[slot].dtrmc_flags = 0;
+		} else if (inner->ba_type == B_AT_FN_DEREF) {
+			int inner_slot = fill_deref_node(inner->ba_value,
+			    dtpi, dtrq);
+			if (inner_slot < 0)
+				return -1;
+			dtrq->dtrq_memcap[slot].dtrmc_argn =
+			    (uint8_t)inner_slot;
+			dtrq->dtrq_memcap[slot].dtrmc_flags = DTMC_FL_MEMBASE;
+		} else if (inner->ba_type == B_AT_FN_SUBSCRIPT) {
+			int inner_slot = fill_subscript_node(inner->ba_value,
+			    dtpi, dtrq);
+			if (inner_slot < 0)
+				return -1;
+			dtrq->dtrq_memcap[slot].dtrmc_argn =
+			    (uint8_t)inner_slot;
+			dtrq->dtrq_memcap[slot].dtrmc_flags = DTMC_FL_MEMBASE;
+		} else {
+			if (verbose)
+				warnx("unsupported cast base for probe %s",
+				    dtpi->dtpi_func);
+			return -1;
+		}
 		dtrq->dtrq_memcap[slot].dtrmc_offset = (int32_t)offset;
 		dtrq->dtrq_memcap[slot].dtrmc_size = size;
 	} else {
@@ -1817,6 +1916,19 @@ ba_fill_deref(struct bt_arg *ba, struct dtioc_probe_info *dtpi,
 				ba_fill_deref(ba->ba_value, dtpi, dtrq);
 			break;
 		case B_AT_OP_PLUS ... B_AT_OP_SHR:
+			if (ba->ba_value != NULL)
+				ba_fill_deref(ba->ba_value, dtpi, dtrq);
+			break;
+		case B_AT_FN_CAST: {
+			struct bt_cast *bca = ba->ba_value;
+			ba_fill_deref(bca->bca_expr, dtpi, dtrq);
+			break;
+		}
+		case B_AT_FN_STR:
+		case B_AT_FN_KSYM:
+		case B_AT_FN_USYM:
+		case B_AT_FN_NTOP:
+		case B_AT_FN_STRNCMP:
 			if (ba->ba_value != NULL)
 				ba_fill_deref(ba->ba_value, dtpi, dtrq);
 			break;
@@ -2407,6 +2519,7 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AT_FN_STRNCMP:
 	case B_AT_FN_DEREF:
 	case B_AT_FN_SUBSCRIPT:
+	case B_AT_FN_CAST:
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		bv->bv_value = baeval(ba, dtev);
 		bv->bv_type = B_VT_LONG;
@@ -2605,6 +2718,7 @@ baeval(struct bt_arg *bval, struct dt_evt *dtev)
 	case B_AT_FN_STRNCMP:
 	case B_AT_FN_DEREF:
 	case B_AT_FN_SUBSCRIPT:
+	case B_AT_FN_CAST:
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		ba = ba_new(ba2long(bval, dtev), B_AT_LONG);
 		break;
@@ -2952,6 +3066,12 @@ ba_name(struct bt_arg *ba)
 		    ba_name(bss->bss_base), bss->bss_index);
 		return buf;
 	}
+	case B_AT_FN_CAST: {
+		static char buf[64];
+		struct bt_cast *bca = ba->ba_value;
+		snprintf(buf, sizeof(buf), "(%s *)", bca->bca_type);
+		return buf;
+	}
 	case B_AT_OP_PLUS:
 		return "+";
 	case B_AT_OP_MINUS:
@@ -3145,6 +3265,11 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 		struct bt_subscript *bss = ba->ba_value;
 		val = (bss->bss_slot != BSS_SLOT_UNSET)
 		    ? (long)dtev->dtev_mem[bss->bss_slot] : 0;
+		break;
+	}
+	case B_AT_FN_CAST: {
+		struct bt_cast *bca = ba->ba_value;
+		val = ba2long(bca->bca_expr, dtev);
 		break;
 	}
 	case B_AT_OP_TERN: {
@@ -3348,6 +3473,11 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		str = buf;
 		break;
 	}
+	case B_AT_FN_CAST: {
+		struct bt_cast *bca = ba->ba_value;
+		str = ba2str(bca->bca_expr, dtev);
+		break;
+	}
 	case B_AT_FN_SIZEOF:
 	case B_AT_FN_LEN:
 	case B_AT_FN_STRNCMP:
@@ -3518,6 +3648,11 @@ ba2flags(struct bt_arg *ba)
 		/* We need the arg's register value (pointer) to dereference. */
 		flags |= DTEVT_FUNCARGS;
 		break;
+	case B_AT_FN_CAST: {
+		struct bt_cast *bca = ba->ba_value;
+		flags |= ba2flags(bca->bca_expr);
+		break;
+	}
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		flags |= ba2dtflags(ba->ba_value);
 		break;
