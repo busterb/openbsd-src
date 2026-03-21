@@ -17,9 +17,13 @@
  */
 
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/queue.h>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #include <assert.h>
 #include <err.h>
@@ -2492,6 +2496,8 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 		bv->bv_value = baeval(ba, dtev);
 		bv->bv_type = B_VT_TUPLE;
 		break;
+	case B_AT_BI_AF_INET:
+	case B_AT_BI_AF_INET6:
 	case B_AT_BI_PID:
 	case B_AT_BI_TID:
 	case B_AT_BI_CPU:
@@ -2524,6 +2530,7 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AT_FN_STR:
 	case B_AT_FN_KSYM:
 	case B_AT_FN_USYM:
+	case B_AT_FN_NTOP:
 		bv->bv_value = baeval(ba, dtev);
 		bv->bv_type = B_VT_STR;
 		break;
@@ -2679,6 +2686,8 @@ baeval(struct bt_arg *bval, struct dt_evt *dtev)
 		ba = baeval(ba_read(bval), NULL);
 		break;
 	case B_AT_LONG:
+	case B_AT_BI_AF_INET:
+	case B_AT_BI_AF_INET6:
 	case B_AT_BI_PID:
 	case B_AT_BI_TID:
 	case B_AT_BI_CPU:
@@ -2710,6 +2719,7 @@ baeval(struct bt_arg *bval, struct dt_evt *dtev)
 	case B_AT_FN_STR:
 	case B_AT_FN_KSYM:
 	case B_AT_FN_USYM:
+	case B_AT_FN_NTOP:
 		ba = ba_new(ba2str(bval, dtev), B_AT_STR);
 		break;
 	case B_AT_TUPLE:
@@ -2961,6 +2971,10 @@ ba_name(struct bt_arg *ba)
 	case B_AT_MAP:
 	case B_AT_HIST:
 		break;
+	case B_AT_BI_AF_INET:
+		return "AF_INET";
+	case B_AT_BI_AF_INET6:
+		return "AF_INET6";
 	case B_AT_BI_PID:
 		return "pid";
 	case B_AT_BI_TID:
@@ -3015,6 +3029,8 @@ ba_name(struct bt_arg *ba)
 		return "ksym";
 	case B_AT_FN_USYM:
 		return "usym";
+	case B_AT_FN_NTOP:
+		return "ntop";
 	case B_AT_FN_STRNCMP:
 		return "strncmp";
 	case B_AT_FN_DEREF: {
@@ -3144,6 +3160,12 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_NIL:
 		val = 0L;
 		break;
+	case B_AT_BI_AF_INET:
+		val = AF_INET;
+		break;
+	case B_AT_BI_AF_INET6:
+		val = AF_INET6;
+		break;
 	case B_AT_BI_PID:
 		val = dtev->dtev_pid;
 		break;
@@ -3176,7 +3198,8 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 		break;
 	case B_AT_FN_KSYM:
 	case B_AT_FN_USYM:
-		/* Symbol names are strings; non-empty means true. */
+	case B_AT_FN_NTOP:
+		/* String functions; non-empty means true. */
 		val = (*ba2str(ba, dtev) != '\0') ? 1 : 0;
 		break;
 	case B_AT_FN_STRNCMP: {
@@ -3310,6 +3333,14 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_BI_COMM:
 		str = dtev->dtev_comm;
 		break;
+	case B_AT_BI_AF_INET:
+		snprintf(buf, sizeof(buf), "%d", AF_INET);
+		str = buf;
+		break;
+	case B_AT_BI_AF_INET6:
+		snprintf(buf, sizeof(buf), "%d", AF_INET6);
+		str = buf;
+		break;
 	case B_AT_BI_CPU:
 		snprintf(buf, sizeof(buf), "%u", dtev->dtev_cpu);
 		str = buf;
@@ -3424,6 +3455,24 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		snprintf(buf, sizeof(buf), "%ld", ba2long(ba, dtev));
 		str = buf;
 		break;
+	case B_AT_FN_NTOP: {
+		struct bt_arg *a1 = ba->ba_value;
+		struct bt_arg *a2 = SLIST_NEXT(a1, ba_next);
+		int af;
+		uint32_t addr;
+
+		if (a2 == NULL) {
+			af = AF_INET;
+			addr = (uint32_t)ba2long(a1, dtev);
+		} else {
+			af = (int)ba2long(a1, dtev);
+			addr = (uint32_t)ba2long(a2, dtev);
+		}
+		if (inet_ntop(af, &addr, buf, sizeof(buf)) == NULL)
+			snprintf(buf, sizeof(buf), "0.0.0.0");
+		str = buf;
+		break;
+	}
 	case B_AT_FN_KSYM: {
 		unsigned long addr = (unsigned long)ba2long(ba->ba_value, dtev);
 		if (kelf != NULL)
@@ -3502,6 +3551,8 @@ ba2flags(struct bt_arg *ba)
 	case B_AT_BI_COMM:
 		flags |= DTEVT_EXECNAME;
 		break;
+	case B_AT_BI_AF_INET:
+	case B_AT_BI_AF_INET6:
 	case B_AT_BI_CPU:
 	case B_AT_BI_PID:
 	case B_AT_BI_TID:
@@ -3537,6 +3588,15 @@ ba2flags(struct bt_arg *ba)
 	case B_AT_FN_SIZEOF:
 		/* sizeof is a compile-time constant; no kernel data needed. */
 		break;
+	case B_AT_FN_NTOP: {
+		/* Propagate flags from all arguments (af and/or addr). */
+		struct bt_arg *a = ba->ba_value;
+		while (a != NULL) {
+			flags |= ba2flags(a);
+			a = SLIST_NEXT(a, ba_next);
+		}
+		break;
+	}
 	case B_AT_FN_KSYM:
 	case B_AT_FN_USYM:
 		/* The address argument may require kernel data. */
