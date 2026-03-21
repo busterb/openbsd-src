@@ -161,6 +161,7 @@ struct bt_arg {
 		B_AT_FN_SIZEOF,			/* sizeof(struct proc) */
 		B_AT_FN_DEREF,			/* arg0->field: struct member deref */
 		B_AT_FN_SUBSCRIPT,		/* arg0[N]: array element read */
+		B_AT_FN_CAST,			/* (type *)expr: type cast */
 
 		B_AT_MF_COUNT,			/* @map[key] = count() */
 		B_AT_MF_MAX,			/* @map[key] = max(nsecs) */
@@ -241,6 +242,19 @@ struct bt_subscript {
 #define BSS_SLOT_UNSET	0xff		/* bss_slot sentinel: not yet assigned */
 
 /*
+ * Type cast node: (type *)expr.
+ *
+ * bca_type names the pointed-to type (e.g. "struct sockaddr_in").
+ * bca_expr is the expression whose pointer value is being reinterpreted.
+ * Used as the base of a B_AT_FN_DEREF or B_AT_FN_SUBSCRIPT node to override
+ * the CTF type used for field/element resolution.
+ */
+struct bt_cast {
+	const char		*bca_type;	/* pointed-to type name */
+	struct bt_arg		*bca_expr;	/* base expression */
+};
+
+/*
  * Ternary expression node: cond ? then : else.
  */
 struct bt_ternary {
@@ -315,6 +329,7 @@ struct bt_arg		*ba_new0(void *, enum bt_argtype);
 struct bt_arg		*bd_new(struct bt_arg *, const char *);
 struct bt_arg		*bsub_new(struct bt_arg *, long);
 struct bt_arg		*btern_new(struct bt_arg *, struct bt_arg *, struct bt_arg *);
+struct bt_arg		*bca_new(const char *, struct bt_arg *);
 
 const char		*bv_name(struct bt_var *);
 

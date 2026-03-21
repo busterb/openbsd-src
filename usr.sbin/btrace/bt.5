@@ -345,6 +345,35 @@ Currently only applies to
 and
 .Cm syscall
 probes.
+.It Pq Ar type Ic * Ar expr Ic -> Ar field
+Type cast: reinterpret
+.Ar expr
+as a pointer to
+.Ar type
+and dereference
+.Ar field
+from the resulting struct.
+.Ar type
+may be a one-word type
+.Pq e.g. Ar sockaddr_in
+or a two-word type with a
+.Ic struct ,
+.Ic union ,
+or
+.Ic enum
+prefix.
+The field is resolved using CTF data from
+.Pa /bsd
+as with uncast dereferences.
+For example,
+.Dl ((struct sockaddr_in *)arg1)->sin_addr
+reinterprets
+.Va arg1
+as a
+.Vt struct sockaddr_in *
+and captures the
+.Va sin_addr
+field.
 .It Fn time timefmt
 Print timestamps using
 .Xr strftime 3 .
