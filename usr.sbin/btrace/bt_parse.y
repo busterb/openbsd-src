@@ -239,6 +239,7 @@ variable: LVAR			{ $$ = bl_find($1); }
 
 factor : '(' expr ')'		{ $$ = $2; }
 	| '(' vargs ',' expr ')'{ $$ = ba_new(ba_append($2, $4), B_AT_TUPLE); }
+	| '(' typename '*' ')' factor	{ $$ = bca_new($2, $5); }
 	| NUMBER		{ $$ = ba_new($1, B_AT_LONG); }
 	| BUILTIN		{ $$ = ba_new(NULL, $1); }
 	| CSTRING		{ $$ = ba_new($1, B_AT_STR); }
@@ -574,6 +575,7 @@ bd_new(struct bt_arg *base, const char *field)
 
 	if (base->ba_type != B_AT_FN_DEREF &&
 	    base->ba_type != B_AT_FN_SUBSCRIPT &&
+	    base->ba_type != B_AT_FN_CAST &&
 	    (base->ba_type < B_AT_BI_ARG0 || base->ba_type > B_AT_BI_ARG9))
 		yyerror("'->' can only be applied to argN, argN[N], or "
 		    "argN->field");
@@ -965,6 +967,7 @@ bsub_new(struct bt_arg *base, long index)
 
 	if (base->ba_type != B_AT_FN_DEREF &&
 	    base->ba_type != B_AT_FN_SUBSCRIPT &&
+	    base->ba_type != B_AT_FN_CAST &&
 	    (base->ba_type < B_AT_BI_ARG0 || base->ba_type > B_AT_BI_ARG9))
 		yyerror("'[]' can only be applied to argN, argN[N], or "
 		    "argN->field");
@@ -997,6 +1000,23 @@ btern_new(struct bt_arg *cond, struct bt_arg *then_ba, struct bt_arg *else_ba)
 	btr->btr_else = else_ba;
 
 	return ba_new(btr, B_AT_OP_TERN);
+}
+
+/*
+ * Type cast: (type *)expr
+ */
+struct bt_arg *
+bca_new(const char *type, struct bt_arg *expr)
+{
+	struct bt_cast *bca;
+
+	bca = calloc(1, sizeof(*bca));
+	if (bca == NULL)
+		err(1, "bt_cast: calloc");
+	bca->bca_type = type;
+	bca->bca_expr = expr;
+
+	return ba_new(bca, B_AT_FN_CAST);
 }
 
 /*
