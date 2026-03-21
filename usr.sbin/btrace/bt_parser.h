@@ -133,6 +133,8 @@ struct bt_arg {
 		B_AT_TMEMBER,			/* tuple member $t.2 */
 		B_AT_NIL,			/* empty value */
 
+		B_AT_BI_AF_INET,		/* AF_INET constant */
+		B_AT_BI_AF_INET6,		/* AF_INET6 constant */
 		B_AT_BI_PID,
 		B_AT_BI_TID,
 		B_AT_BI_COMM,
@@ -162,6 +164,7 @@ struct bt_arg {
 		B_AT_FN_KSYM,			/* ksym(addr): kernel symbol name */
 		B_AT_FN_USYM,			/* usym(addr): userland symbol name */
 		B_AT_FN_LEN,			/* len(@map): number of map entries */
+		B_AT_FN_NTOP,			/* ntop(addr): format IPv4 address as string */
 		B_AT_FN_STRNCMP,		/* strncmp(s1, s2, n): compare n bytes */
 		B_AT_FN_DEREF,			/* arg0->field: struct member deref */
 		B_AT_FN_SUBSCRIPT,		/* arg0[N]: array element read */
