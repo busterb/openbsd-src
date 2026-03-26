@@ -388,7 +388,7 @@ dtpi_print_list(int fd)
 	dtpi = dt_dtpis;
 	for (i = 0; i < dt_ndtpi; i++, dtpi++) {
 		/*
-		 * Skip duplicate entries.  kretprobe creates one probe
+		 * Skip duplicate entries.  kprobe:fn:return creates one probe
 		 * per ret instruction; only show the function once.
 		 */
 		if (prev != NULL &&
