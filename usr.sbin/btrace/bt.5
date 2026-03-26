@@ -76,16 +76,21 @@ Probe format:
 or
 .Ic syscall : Ns Ar name Ns Ic :return .
 .It Cm kprobe
-Trace kernel function entry points.
+Trace kernel function entry and return points.
 Probe format:
-.Ic kprobe : Ns Ar func .
-.It Cm kretprobe
-Trace kernel function return points, capturing the return value.
-Probe format:
-.Ic kretprobe : Ns Ar func .
+.Ic kprobe : Ns Ar func Ns Ic :entry
+or
+.Ic kprobe : Ns Ar func Ns Ic :return .
 The
 .Va retval
-variable contains the function's return value.
+variable is set for return probes.
+The shorthand
+.Ic kprobe : Ns Ar func
+(without a name) is an alias for
+.Ic kprobe : Ns Ar func Ns Ic :entry .
+.Ic kretprobe : Ns Ar func
+is an alias for
+.Ic kprobe : Ns Ar func Ns Ic :return .
 .It Cm profile
 Periodic sampling timer that fires on all CPUs.
 Probe format:
@@ -179,7 +184,7 @@ Process ID of the current thread.
 Full name of the probe.
 .It Va retval
 Return value of the traced syscall or
-.Cm kretprobe
+.Cm kprobe
 return probe.
 .It Va tid
 Thread ID of the current thread.

@@ -56,14 +56,6 @@ struct dt_provider dt_prov_kprobe = {
 	.dtpv_dealloc = dt_prov_kprobe_dealloc,
 };
 
-struct dt_provider dt_prov_kretprobe = {
-	.dtpv_name    = "kretprobe",
-	.dtpv_alloc   = dt_prov_kprobe_alloc,
-	.dtpv_enter   = NULL,
-	.dtpv_leave   = NULL,
-	.dtpv_dealloc = dt_prov_kprobe_dealloc,
-};
-
 /*
  * IBT endbr64 prefix: f3 0f 1e fa (4 bytes)
  */
@@ -309,7 +301,7 @@ dt_prov_kprobe_init(void)
 		if (entryoff < 0)
 			continue;
 
-		dtp = dt_dev_alloc_probe(name, "", &dt_prov_kprobe);
+		dtp = dt_dev_alloc_probe(name, "entry", &dt_prov_kprobe);
 		if (dtp == NULL)
 			break;
 
@@ -324,8 +316,8 @@ dt_prov_kprobe_init(void)
 		for (retoff = entryoff + 1;
 		    (retoff = db_epilogue_validate(symp, retoff)) >= 0;
 		    retoff++) {
-			dtp = dt_dev_alloc_probe(name, "",
-			    &dt_prov_kretprobe);
+			dtp = dt_dev_alloc_probe(name, "return",
+			    &dt_prov_kprobe);
 			if (dtp == NULL)
 				goto done;
 

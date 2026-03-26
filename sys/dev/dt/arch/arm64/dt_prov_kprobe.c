@@ -25,9 +25,9 @@
  * prologue detection and return scanning are straightforward with
  * no variable-length decoding or jump-table heuristics needed.
  *
- * Compatible with bpftrace probe naming:
- *   kprobe:function      - function entry
- *   kretprobe:function   - function return (captures retval)
+ * Probe naming:
+ *   kprobe:function:entry  - function entry
+ *   kprobe:function:return - function return (captures retval)
  */
 
 #include <sys/types.h>
@@ -62,14 +62,6 @@ int	dt_prov_kprobe_dealloc(struct dt_probe *, struct dt_softc *,
 
 struct dt_provider dt_prov_kprobe = {
 	.dtpv_name    = "kprobe",
-	.dtpv_alloc   = dt_prov_kprobe_alloc,
-	.dtpv_enter   = NULL,
-	.dtpv_leave   = NULL,
-	.dtpv_dealloc = dt_prov_kprobe_dealloc,
-};
-
-struct dt_provider dt_prov_kretprobe = {
-	.dtpv_name    = "kretprobe",
 	.dtpv_alloc   = dt_prov_kprobe_alloc,
 	.dtpv_enter   = NULL,
 	.dtpv_leave   = NULL,
@@ -232,7 +224,7 @@ dt_prov_kprobe_init(void)
 		/*
 		 * Create the entry probe.
 		 */
-		dtp = dt_dev_alloc_probe(name, "", &dt_prov_kprobe);
+		dtp = dt_dev_alloc_probe(name, "entry", &dt_prov_kprobe);
 		if (dtp == NULL)
 			break;
 
@@ -256,8 +248,8 @@ dt_prov_kprobe_init(void)
 			/*
 			 * Create a return probe for this ret site.
 			 */
-			dtp = dt_dev_alloc_probe(name, "",
-			    &dt_prov_kretprobe);
+			dtp = dt_dev_alloc_probe(name, "return",
+			    &dt_prov_kprobe);
 			if (dtp == NULL)
 				goto done;
 

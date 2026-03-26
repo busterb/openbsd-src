@@ -294,7 +294,6 @@ struct dt_provider {
 };
 
 extern struct dt_provider dt_prov_kprobe;
-extern struct dt_provider dt_prov_kretprobe;
 
 int		 dt_prov_profile_init(void);
 int		 dt_prov_syscall_init(void);
