@@ -561,6 +561,46 @@ cpu_identify(struct cpu_info *ci)
 	part = CPU_PART(midr);
 	ci->ci_midr = midr;
 
+	/*
+	 * Tag known efficiency-class cores so the scheduler can
+	 * deprioritise them for normal (non-niced) processes.
+	 */
+	switch (impl) {
+	case CPU_IMPL_ARM:
+		switch (part) {
+		case CPU_PART_CORTEX_A34:
+		case CPU_PART_CORTEX_A35:
+		case CPU_PART_CORTEX_A53:
+		case CPU_PART_CORTEX_A55:
+		case CPU_PART_CORTEX_A510:
+		case CPU_PART_CORTEX_A520:
+		case CPU_PART_CORTEX_A520AE:
+		case CPU_PART_CORTEX_A320:
+			ci->ci_efficiency = 1;
+			break;
+		}
+		break;
+	case CPU_IMPL_QCOM:
+		switch (part) {
+		case CPU_PART_KRYO400_SILVER:
+			ci->ci_efficiency = 1;
+			break;
+		}
+		break;
+	case CPU_IMPL_APPLE:
+		switch (part) {
+		case CPU_PART_ICESTORM:
+		case CPU_PART_ICESTORM_PRO:
+		case CPU_PART_ICESTORM_MAX:
+		case CPU_PART_BLIZZARD:
+		case CPU_PART_BLIZZARD_PRO:
+		case CPU_PART_BLIZZARD_MAX:
+			ci->ci_efficiency = 1;
+			break;
+		}
+		break;
+	}
+
 	for (i = 0; cpu_implementers[i].name; i++) {
 		if (impl == cpu_implementers[i].id) {
 			impl_name = cpu_implementers[i].name;

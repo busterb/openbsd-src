@@ -131,6 +131,7 @@ struct cpu_info {
 	u_int32_t		ci_smt_id;
 	u_int32_t		ci_core_id;
 	u_int32_t		ci_pkg_id;
+	u_int32_t		ci_efficiency;
 
 	struct proc		*ci_curproc;
 	struct pcb		*ci_curpcb;

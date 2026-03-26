@@ -365,7 +365,7 @@ again:
 			panic("no idleproc set on CPU%d",
 			    CPU_INFO_UNIT(curcpu()));
 		p->p_stat = SRUN;
-	} 
+	}
 
 	KASSERT(p->p_wchan == NULL);
 	KASSERT(!ISSET(p->p_flag, P_INSCHED));
@@ -562,7 +562,7 @@ log2(unsigned int i)
 
 /*
  * Calculate the cost of moving the proc to this cpu.
- * 
+ *
  * What we want is some guesstimate of how much "performance" it will
  * cost us to move the proc here. Not just for caches and TLBs and NUMA
  * memory, but also for the proc itself. A highly loaded cpu might not
@@ -574,6 +574,7 @@ log2(unsigned int i)
 int sched_cost_priority = 1;
 int sched_cost_runnable = 3;
 int sched_cost_resident = 1;
+int sched_cost_efficiency = 8;
 #endif
 
 int
@@ -617,6 +618,15 @@ sched_proc_to_cpu_cost(struct cpu_info *ci, struct proc *p)
 		    log2(pmap_resident_count(p->p_vmspace->vm_map.pmap));
 		cost -= l2resident * sched_cost_resident;
 	}
+
+#ifdef __HAVE_CPU_TOPOLOGY
+	/*
+	 * Prefer performance cores for normal processes; efficiency cores
+	 * are acceptable for background (niced) work.
+	 */
+	if (ci->ci_efficiency && p->p_p->ps_nice <= NZERO)
+		cost += sched_cost_efficiency;
+#endif
 #endif
 	return (cost);
 }
