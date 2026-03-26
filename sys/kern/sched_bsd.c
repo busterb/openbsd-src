@@ -64,6 +64,9 @@ uint32_t		decay_aftersleep(uint32_t, uint32_t);
 
 extern struct cpuset sched_idle_cpus;
 extern struct cpuset sched_all_cpus;
+#ifdef __HAVE_CPU_TOPOLOGY
+int sched_faster_core_idle(const struct cpu_info *);
+#endif
 
 /*
  * constants for averages over 1, 5, and 15 minutes when sampling at
@@ -335,6 +338,20 @@ preempt(void)
 	struct proc *p = curproc;
 
 	SCHED_LOCK();
+#ifdef __HAVE_CPU_TOPOLOGY
+	/*
+	 * If a higher-capacity core is idle, pass NULL to setrunqueue so
+	 * sched_choosecpu re-evaluates the best CPU and migrates the process
+	 * there.  If all faster cores are busy sched_choosecpu returns the
+	 * current CPU and the process stays put.
+	 */
+	if (!(p->p_flag & P_CPUPEG) && sched_faster_core_idle(p->p_cpu)) {
+		setrunqueue(NULL, p, p->p_usrpri);
+		p->p_ru.ru_nivcsw++;
+		mi_switch();
+		return;
+	}
+#endif
 	setrunqueue(p->p_cpu, p, p->p_usrpri);
 	p->p_ru.ru_nivcsw++;
 	mi_switch();
