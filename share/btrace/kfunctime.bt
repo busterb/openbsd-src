@@ -7,11 +7,11 @@
  * the elapsed time in nanoseconds.  Change the function name to
  * measure other kernel functions.
  */
-kprobe:dofilewritev {
+kprobe:dofilewritev:entry {
 	@start[tid] = nsecs;
 }
 
-kretprobe:dofilewritev /@start[tid]/ {
+kprobe:dofilewritev:return /@start[tid]/ {
 	printf("write took %d ns\n", nsecs - @start[tid]);
 	delete(@start[tid]);
 }

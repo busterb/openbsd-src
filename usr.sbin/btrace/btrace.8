@@ -82,7 +82,7 @@ Trace all kernel memory allocation functions, showing arguments:
 .Pp
 Trace return values from a kernel function:
 .Pp
-.Dl # btrace -e 'kretprobe:malloc { printf("malloc returned %s\en", retval); }'
+.Dl # btrace -e 'kprobe:malloc:return { printf("malloc returned %s\en", retval); }'
 .Pp
 Count function calls matching a pattern:
 .Pp

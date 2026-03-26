@@ -6,7 +6,7 @@
  * Uses wildcard kprobes to match all uvm_* kernel functions and
  * prints call counts every 5 seconds.
  */
-kprobe:uvm_* {
+kprobe:uvm_*:entry {
 	@[probe] = count();
 }
 
