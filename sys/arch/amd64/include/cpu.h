@@ -192,6 +192,7 @@ struct cpu_info {
 	u_int32_t	ci_smt_id;		/* [I] */
 	u_int32_t	ci_core_id;		/* [I] */
 	u_int32_t	ci_pkg_id;		/* [I] */
+	uint64_t	ci_capacity;		/* [I] scheduling capacity */
 
 	struct cpu_functions *ci_func;		/* [I] */
 	void (*cpu_setup)(struct cpu_info *);	/* [I] */
