@@ -23,6 +23,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/proc.h>
+#include <sys/sched.h>
 #include <sys/malloc.h>
 #include <sys/device.h>
 #include <sys/sysctl.h>
@@ -1210,7 +1211,7 @@ cpu_identify(struct cpu_info *ci)
 
 		if (ID_AA64ZFR0_BITPERM(id) >= ID_AA64ZFR0_BITPERM_IMPL)
 			printf(",BitPerm");
-		
+
 		if (ID_AA64ZFR0_AES(id) >= ID_AA64ZFR0_AES_BASE)
 			printf(",AES");
 		if (ID_AA64ZFR0_AES(id) >= ID_AA64ZFR0_AES_PMULL)
@@ -2449,7 +2450,7 @@ cpu_opp_get_cooling_level(void *cookie, uint32_t *cells)
 {
 	struct cpu_info *ci = cookie;
 	struct opp_table *ot = ci->ci_opp_table;
-	
+
 	return ot->ot_nopp - ci->ci_opp_max - 1;
 }
 
@@ -2567,7 +2568,7 @@ cpu_psci_init(struct cpu_info *ci)
 	 * We found the "psci" power domain.  If this power domain has
 	 * a parent power domain, stash its phandle away for later.
 	 */
- 
+
 	cluster = OF_getpropint(node, "power-domains", 0);
 
 	/*

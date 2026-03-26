@@ -292,7 +292,7 @@ cpu_startup(void)
 	curpcb->pcb_flags = 0;
 	curpcb->pcb_tf = &proc0tf;
 
-	sched_blockcpu = CPUTYP_L;
+	sched_blockcpu = 0;
 
 	if (boothowto & RB_CONFIG) {
 #ifdef BOOT_CONFIG

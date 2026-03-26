@@ -32,8 +32,13 @@
 
 void sched_kthreads_create(void *);
 
+#ifdef MULTIPROCESSOR
 int sched_proc_to_cpu_cost(struct cpu_info *ci, struct proc *p);
 struct proc *sched_steal_proc(struct cpu_info *);
+#endif
+#ifdef __HAVE_CPU_TOPOLOGY
+int sched_faster_core_idle(const struct cpu_info *);
+#endif
 
 /*
  * To help choosing which cpu should run which process we keep track
@@ -138,6 +143,65 @@ sched_kthreads_create(void *v)
 	num++;
 }
 
+#ifdef __HAVE_CPU_TOPOLOGY
+/*
+ * CPUs sorted by ci_capacity descending.  Rebuilt each time a CPU joins or
+ * leaves sched_all_cpus.  choosecpu iterates this array forward (high
+ * capacity first) for normal work and backward for background work, so that
+ * faster cores are preferred for foreground processes and slower cores absorb
+ * niced work without competing for the best hardware.
+ */
+static struct cpu_info *sched_cpu_order[MAXCPUS];
+static int sched_ncpus_order;
+
+static void
+sched_rebuild_order(void)
+{
+	struct cpu_info *ci;
+	CPU_INFO_ITERATOR cii;
+	struct cpu_info *key;
+	int i, j, n = 0;
+
+	SCHED_ASSERT_LOCKED();
+
+	CPU_INFO_FOREACH(cii, ci) {
+		if (cpuset_isset(&sched_all_cpus, ci))
+			sched_cpu_order[n++] = ci;
+	}
+	/* Insertion sort descending by ci_capacity (n is small). */
+	for (i = 1; i < n; i++) {
+		key = sched_cpu_order[i];
+		for (j = i - 1; j >= 0 &&
+		    sched_cpu_order[j]->ci_capacity < key->ci_capacity; j--)
+			sched_cpu_order[j + 1] = sched_cpu_order[j];
+		sched_cpu_order[j + 1] = key;
+	}
+	sched_ncpus_order = n;
+}
+
+/*
+ * Return non-zero if any CPU with strictly higher capacity than ci is
+ * currently idle.  sched_cpu_order is sorted descending by capacity, so
+ * we stop as soon as we reach a core no faster than ci.
+ * Must be called with SCHED_LOCK held.
+ */
+int
+sched_faster_core_idle(const struct cpu_info *ci)
+{
+	int i;
+
+	SCHED_ASSERT_LOCKED();
+	for (i = 0; i < sched_ncpus_order; i++) {
+		struct cpu_info *fci = sched_cpu_order[i];
+		if (fci->ci_capacity <= ci->ci_capacity)
+			break;
+		if (cpuset_isset(&sched_idle_cpus, fci))
+			return 1;
+	}
+	return 0;
+}
+#endif /* __HAVE_CPU_TOPOLOGY */
+
 void
 sched_idle(void *v)
 {
@@ -156,6 +220,9 @@ sched_idle(void *v)
 #ifdef __HAVE_CPU_TOPOLOGY
 	if ((ci->ci_cputype & sched_blockcpu) == 0)
 		cpuset_add(&sched_all_cpus, ci);
+	SCHED_LOCK();
+	sched_rebuild_order();
+	SCHED_UNLOCK();
 #else
 	cpuset_add(&sched_all_cpus, ci);
 #endif
@@ -188,6 +255,29 @@ sched_idle(void *v)
 		smr_idle();
 
 		cpuset_add(&sched_idle_cpus, ci);
+#ifdef __HAVE_CPU_TOPOLOGY
+		/*
+		 * When a core becomes idle, signal any active lower-capacity
+		 * cores running a moveable process.  They will preempt and
+		 * migrate here via sched_choosecpu.  ci_capacity is fixed at
+		 * init so the comparison is safe without any lock.
+		 */
+		{
+			CPU_INFO_ITERATOR ncii;
+			struct cpu_info *lci;
+			CPU_INFO_FOREACH(ncii, lci) {
+				struct proc *lp;
+				if (lci->ci_capacity >= ci->ci_capacity ||
+				    cpuset_isset(&sched_idle_cpus, lci))
+					continue;
+				lp = lci->ci_curproc;
+				if (lp != NULL &&
+				    lp != lci->ci_schedstate.spc_idleproc &&
+				    !(lp->p_flag & P_CPUPEG))
+					need_resched(lci);
+			}
+		}
+#endif
 		cpu_idle_enter();
 		while (spc->spc_whichqs == 0) {
 #ifdef MULTIPROCESSOR
@@ -365,7 +455,7 @@ again:
 			panic("no idleproc set on CPU%d",
 			    CPU_INFO_UNIT(curcpu()));
 		p->p_stat = SRUN;
-	} 
+	}
 
 	KASSERT(p->p_wchan == NULL);
 	KASSERT(!ISSET(p->p_flag, P_INSCHED));
@@ -407,16 +497,40 @@ sched_choosecpu_fork(struct proc *parent, int flags)
 	if (cpuset_first(&set) == NULL)
 		cpuset_copy(&set, &sched_all_cpus);
 
+#ifdef __HAVE_CPU_TOPOLOGY
+	/*
+	 * Iterate CPUs in capacity order, highest first, so that fast cores
+	 * win ties for both normal and background work.  Normal work skips
+	 * L cores entirely; background work includes them so that L cores
+	 * absorb spillover only when all P/E cores are already busy.
+	 */
+	{
+		int background = parent->p_p->ps_nice > NZERO;
+		int i, n = sched_ncpus_order;
+
+		for (i = 0; i < n; i++) {
+			ci = sched_cpu_order[i];
+			if (!cpuset_isset(&set, ci))
+				continue;
+			if (!background && ci->ci_cputype == CPUTYP_L)
+				continue;
+			run = ci->ci_schedstate.spc_nrun;
+			if (choice == NULL || run < best_run) {
+				choice = ci;
+				best_run = run;
+			}
+		}
+	}
+#else
 	while ((ci = cpuset_first(&set)) != NULL) {
 		cpuset_del(&set, ci);
-
 		run = ci->ci_schedstate.spc_nrun;
-
 		if (choice == NULL || run < best_run) {
 			choice = ci;
 			best_run = run;
 		}
 	}
+#endif
 
 	if (choice != NULL)
 		return (choice);
@@ -455,11 +569,17 @@ sched_choosecpu(struct proc *p)
 	 * this is simple.
 	 * Also, our cpu might not be idle, but if it's the current cpu
 	 * and it has nothing else queued and we're curproc, take it.
+	 * Skip this fast path if a higher-capacity core is idle; the full
+	 * cost evaluation will migrate the process there instead.
 	 */
-	if (cpuset_isset(&set, p->p_cpu) ||
+	if ((cpuset_isset(&set, p->p_cpu) ||
 	    (p->p_cpu == curcpu() && p->p_cpu->ci_schedstate.spc_nrun == 0 &&
 	    (p->p_cpu->ci_schedstate.spc_schedflags & SPCF_SHOULDHALT) == 0 &&
-	    curproc == p)) {
+	    curproc == p))
+#ifdef __HAVE_CPU_TOPOLOGY
+	    && !sched_faster_core_idle(p->p_cpu)
+#endif
+	    ) {
 		sched_wasidle++;
 		return (p->p_cpu);
 	}
@@ -467,15 +587,41 @@ sched_choosecpu(struct proc *p)
 	if (cpuset_first(&set) == NULL)
 		cpuset_copy(&set, &sched_all_cpus);
 
+#ifdef __HAVE_CPU_TOPOLOGY
+	/*
+	 * Iterate CPUs in capacity order, highest first, so that fast cores
+	 * win ties for both normal and background work.  Normal work skips
+	 * L cores entirely; background work includes them so that L cores
+	 * absorb spillover only when all P/E cores are already busy.
+	 */
+	{
+		int background = p->p_p->ps_nice > NZERO;
+		int i, n = sched_ncpus_order;
+
+		for (i = 0; i < n; i++) {
+			int cost;
+			ci = sched_cpu_order[i];
+			if (!cpuset_isset(&set, ci))
+				continue;
+			if (!background && ci->ci_cputype == CPUTYP_L)
+				continue;
+			cost = sched_proc_to_cpu_cost(ci, p);
+			if (choice == NULL || cost < last_cost) {
+				choice = ci;
+				last_cost = cost;
+			}
+		}
+	}
+#else
 	while ((ci = cpuset_first(&set)) != NULL) {
 		int cost = sched_proc_to_cpu_cost(ci, p);
-
+		cpuset_del(&set, ci);
 		if (choice == NULL || cost < last_cost) {
 			choice = ci;
 			last_cost = cost;
 		}
-		cpuset_del(&set, ci);
 	}
+#endif
 
 	if (p->p_cpu != choice)
 		sched_nmigrations++;
@@ -522,7 +668,15 @@ sched_steal_proc(struct cpu_info *self)
 		TAILQ_FOREACH(p, &spc->spc_qs[queue], p_runq) {
 			if (p->p_flag & P_CPUPEG)
 				continue;
-
+#ifdef __HAVE_CPU_TOPOLOGY
+			/*
+			 * L cores only run background work; don't let them
+			 * steal normal processes from P or E cores.
+			 */
+			if (self->ci_cputype == CPUTYP_L &&
+			    p->p_p->ps_nice <= NZERO)
+				continue;
+#endif
 			cost = sched_proc_to_cpu_cost(self, p);
 
 			if (best == NULL || cost < bestcost) {
@@ -562,7 +716,7 @@ log2(unsigned int i)
 
 /*
  * Calculate the cost of moving the proc to this cpu.
- * 
+ *
  * What we want is some guesstimate of how much "performance" it will
  * cost us to move the proc here. Not just for caches and TLBs and NUMA
  * memory, but also for the proc itself. A highly loaded cpu might not
@@ -574,13 +728,11 @@ log2(unsigned int i)
 int sched_cost_priority = 1;
 int sched_cost_runnable = 3;
 int sched_cost_resident = 1;
-#endif
 
 int
 sched_proc_to_cpu_cost(struct cpu_info *ci, struct proc *p)
 {
 	int cost = 0;
-#ifdef MULTIPROCESSOR
 	struct schedstate_percpu *spc;
 	int l2resident = 0;
 
@@ -617,9 +769,31 @@ sched_proc_to_cpu_cost(struct cpu_info *ci, struct proc *p)
 		    log2(pmap_resident_count(p->p_vmspace->vm_map.pmap));
 		cost -= l2resident * sched_cost_resident;
 	}
+
+#ifdef __HAVE_CPU_TOPOLOGY
+	/*
+	 * Penalise any core when a higher-capacity core is idle, so that
+	 * processes wake onto the fastest available hardware rather than
+	 * staying put due to equal load.  When all faster cores are busy
+	 * the penalty is not applied and normal load-balancing takes over.
+	 */
+	{
+		int i;
+		for (i = 0; i < sched_ncpus_order; i++) {
+			struct cpu_info *fci = sched_cpu_order[i];
+			if (fci->ci_capacity <= ci->ci_capacity)
+				break;
+			if (cpuset_isset(&sched_idle_cpus, fci)) {
+				cost += sched_cost_runnable * 8;
+				break;
+			}
+		}
+	}
 #endif
+
 	return (cost);
 }
+#endif /* MULTIPROCESSOR */
 
 /*
  * Peg a proc to a cpu.
@@ -869,6 +1043,9 @@ sched_cpuadjust(int newblockcpu)
 				cpuset_add(&sched_all_cpus, ci);
 		}
 	}
+	SCHED_LOCK();
+	sched_rebuild_order();
+	SCHED_UNLOCK();
 	return 0;
 }
 
