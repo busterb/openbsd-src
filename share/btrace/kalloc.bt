@@ -6,6 +6,6 @@
  * Uses wildcard kprobes to match all kernel functions containing "alloc"
  * and displays probe name with CTF-formatted arguments.
  */
-kprobe:*alloc* {
+kprobe:*alloc*:entry {
 	printf("%s(%s)\n", probe, arg0);
 }

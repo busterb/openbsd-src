@@ -513,6 +513,18 @@ bp_new(const char *prov, const char *func, const char *name, long number)
 	else
 		ptype = B_PT_PROBE;
 
+	/*
+	 * kretprobe:fn is an alias for kprobe:fn:return.
+	 * kprobe:fn (without an explicit name) defaults to kprobe:fn:entry.
+	 */
+	if (prov != NULL && strcmp(prov, "kretprobe") == 0) {
+		prov = "kprobe";
+		name = "return";
+	} else if (prov != NULL && strcmp(prov, "kprobe") == 0 &&
+	    name != NULL && name[0] == '\0') {
+		name = "entry";
+	}
+
 	bp = calloc(1, sizeof(*bp));
 	if (bp == NULL)
 		err(1, "bt_probe: calloc");
