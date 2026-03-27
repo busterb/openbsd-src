@@ -14,7 +14,7 @@ kprobe:sched_proc_to_cpu_cost:entry {
 }
 
 kprobe:sched_proc_to_cpu_cost:return /@_cpuid[tid] >= 0/ {
-	@cost_by_cpu[@_cpuid[tid]] = hist(retval);
+	@cost_by_cpu[@_cpuid[tid]] = hist((int32_t)retval);
 	delete(@_cpuid[tid]);
 }
 
