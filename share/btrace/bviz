@@ -7,11 +7,15 @@
 # Usage:
 #   btrace -j -e 'script' | bviz
 #   btrace -j script.bt | bviz
+#   btrace -j script.bt | bviz --speedscope > profile.speedscope
 #
 # Supported types emitted by btrace -j:
 #   maphist  @map[key] = hist(v)  -> 2-D heatmap (rows=keys, cols=buckets)
 #   hist     @h = hist(v)         -> bar chart
 #   map      @map[key] = count()  -> bar chart sorted by value
+#
+# With --speedscope: accumulates stack samples and writes a speedscope-format
+# JSON file to stdout on exit.  Open the result at https://speedscope.app.
 
 import json
 import os
@@ -271,43 +275,115 @@ def render_map(obj):
         print(f'{key:>16} {v:8d} |{"#" * i}{" " * (bar_width - i)}|')
 
 
+def _to_speedscope(stacks_by_name):
+    """
+    Convert {name: {stack_str: count}} to a speedscope-format dict.
+
+    speedscope sampled profile layout:
+      shared.frames  - deduplicated frame name table
+      profiles[]     - one entry per named map
+        samples[]    - each stack as [root_idx, ..., leaf_idx]
+        weights[]    - sample count for each stack
+    """
+    frame_index = {}
+    frames = []
+
+    profiles = []
+    for name, data in stacks_by_name.items():
+        samples = []
+        weights = []
+        for key_str, count in data.items():
+            parsed = _parse_stack(key_str)   # outermost (root) first
+            if not parsed:
+                continue
+            indices = []
+            for fname in parsed:
+                if fname not in frame_index:
+                    frame_index[fname] = len(frames)
+                    frames.append({'name': fname})
+                indices.append(frame_index[fname])
+            samples.append(indices)
+            weights.append(int(count))
+
+        total = sum(weights)
+        profiles.append({
+            'type': 'sampled',
+            'name': name,
+            'unit': 'none',
+            'startValue': 0,
+            'endValue': total,
+            'samples': samples,
+            'weights': weights,
+        })
+
+    return {
+        '$schema': 'https://www.speedscope.app/file-format-schema.json',
+        'shared': {'frames': frames},
+        'profiles': profiles,
+        'name': 'btrace profile',
+        'activeProfileIndex': 0,
+        'exporter': 'bviz',
+    }
+
+
 def main():
-    # sections: name -> last received JSON object
-    sections = {}
+    speedscope = '--speedscope' in sys.argv
 
-    print(CLEAR, end='', flush=True)
+    # accumulate: name -> {stack_str: total_count}
+    accumulated = {}
+    sections    = {}
 
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            # Pass through non-JSON lines (e.g. printf output) to stderr
-            print(line, file=sys.stderr)
-            continue
+    if not speedscope:
+        print(CLEAR, end='', flush=True)
 
-        name = obj.get('name', '?')
-        sections[name] = obj
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                print(line, file=sys.stderr)
+                continue
 
-        # Redraw all sections from top
-        print(CLEAR, end='')
-        for n, o in sections.items():
-            t = o.get('type')
-            if t == 'maphist':
-                render_maphist(o)
-            elif t == 'hist':
-                render_hist(o)
-            elif t == 'map':
-                render_map(o)
-            print()
-        sys.stdout.flush()
+            name = obj.get('name', '?')
+            t    = obj.get('type')
+            data = obj.get('data', {})
+
+            if speedscope:
+                # Only accumulate stack maps (keys contain '\n')
+                if t == 'map' and data and any('\n' in k for k in data):
+                    bucket = accumulated.setdefault(name, {})
+                    for k, v in data.items():
+                        bucket[k] = bucket.get(k, 0) + int(v)
+                continue
+
+            sections[name] = obj
+
+            print(CLEAR, end='')
+            for n, o in sections.items():
+                ot = o.get('type')
+                if ot == 'maphist':
+                    render_maphist(o)
+                elif ot == 'hist':
+                    render_hist(o)
+                elif ot == 'map':
+                    render_map(o)
+                print()
+            sys.stdout.flush()
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if speedscope:
+            json.dump(_to_speedscope(accumulated), sys.stdout,
+                      separators=(',', ':'))
+            sys.stdout.write('\n')
+            sys.stdout.flush()
+        else:
+            print(RESET)
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        print(RESET)
-        sys.exit(0)
+    main()
