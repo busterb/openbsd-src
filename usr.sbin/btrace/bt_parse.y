@@ -1387,7 +1387,7 @@ again:
 				yylval.v.arg = get_varg(num);
 				return PVAR;
 			}
-		} else if (isalpha(c)) {
+		} else if (isalpha(c) || c == '_') {
 			do {
 				*p++ = c;
 				if (p == ebuf) {
@@ -1407,7 +1407,7 @@ again:
 	case '@':
 		c = lgetc();
 		/* check for unnamed map '@' */
-		if (isalpha(c)) {
+		if (isalpha(c) || c == '_') {
 			do {
 				*p++ = c;
 				if (p == ebuf) {
