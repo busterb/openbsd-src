@@ -3,11 +3,8 @@
 /*
  * kprofile.bt	Kernel CPU profiling (stack sampling) at 100Hz.
  *
- * Live flame graph in the terminal (icicle chart, Ctrl+C to stop):
- *	btrace -V /usr/share/btrace/kprofile.bt
- *
- * Live flame graph via bviz (requires bviz in PATH):
- *	btrace -j /usr/share/btrace/kprofile.bt | bviz
+ * Collects samples until Ctrl+C, then prints the full cumulative result.
+ * For a live rolling flame graph use kflamegraph.bt instead.
  *
  * To produce a FlameGraph SVG using the FlameGraph tools at
  * https://github.com/brendangregg/FlameGraph:
