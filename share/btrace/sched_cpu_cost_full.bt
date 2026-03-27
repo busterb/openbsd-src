@@ -1,0 +1,50 @@
+/*	$OpenBSD$	*/
+
+/*
+ * sched_cpu_cost_full.bt	Analyze sched_proc_to_cpu_cost() per CPU.
+ *
+ * Like sched_cpu_cost.bt but also captures ci_sched_cost (the efficiency
+ * core bias) and p_usrpri (process user priority) at entry for richer
+ * analysis.  Three per-tid scratch maps are used to correlate entry args
+ * with the return value.
+ *
+ * NOTE: this script has been observed to hang on some runs.  It is kept
+ * as a debugging aid to investigate the root cause.
+ */
+
+kprobe:sched_proc_to_cpu_cost:entry {
+	@_cpuid[tid] = arg0->ci_cpuid;
+	@_sched_cost[tid] = arg0->ci_sched_cost;
+	@_usrpri[tid] = arg1->p_usrpri;
+}
+
+kprobe:sched_proc_to_cpu_cost:return /@_cpuid[tid] >= 0/ {
+	$cpuid = @_cpuid[tid];
+	$sched_cost = @_sched_cost[tid];
+
+	@cost_by_cpu[$cpuid] = hist(retval);
+	@sched_cost_bias[$cpuid] = max($sched_cost);
+	@evals[$cpuid] = count();
+
+	delete(@_cpuid[tid]);
+	delete(@_sched_cost[tid]);
+	delete(@_usrpri[tid]);
+}
+
+interval:s:5 {
+	printf("\n--- sched_proc_to_cpu_cost distributions (5s window) ---\n");
+	print(@cost_by_cpu);
+	printf("\n--- ci_sched_cost bias per CPU ---\n");
+	print(@sched_cost_bias);
+	printf("\n--- Evaluations per CPU ---\n");
+	print(@evals);
+	clear(@cost_by_cpu);
+	clear(@sched_cost_bias);
+	clear(@evals);
+}
+
+END {
+	clear(@_cpuid);
+	clear(@_sched_cost);
+	clear(@_usrpri);
+}
