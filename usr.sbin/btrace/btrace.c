@@ -183,6 +183,7 @@ char			**vargs;
 int			 nargs = 0;
 int			 verbose = 0;
 int			 quiet = 0;
+int			 bt_json = 0;
 int			 dtfd;
 uint64_t		 g_start_nsecs;
 volatile sig_atomic_t	 quit_pending;
@@ -204,11 +205,14 @@ main(int argc, char *argv[])
 
 	setlocale(LC_ALL, "");
 
-	while ((ch = getopt(argc, argv, "e:lnp:qv")) != -1) {
+	while ((ch = getopt(argc, argv, "e:jlnp:qv")) != -1) {
 		switch (ch) {
 		case 'e':
 			btscript = optarg;
 			btslen = strlen(btscript);
+			break;
+		case 'j':
+			bt_json = 1;
 			break;
 		case 'l':
 			showprobes = 1;
@@ -296,7 +300,7 @@ main(int argc, char *argv[])
 __dead void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-lnqv] "
+	fprintf(stderr, "usage: %s [-jlnqv] "
 	    "programfile | -e program [argument ...]\n", getprogname());
 	exit(1);
 }
@@ -1178,12 +1182,25 @@ rule_printmaps(struct bt_rule *r)
 			if (bv->bv_printed)
 				continue;
 
-			if (bv->bv_type == B_VT_MAPHIST)
-				map_hist_print(map, bv_name(bv));
-			else if (ba->ba_type == B_AT_MAP)
-				map_print(map, SIZE_T_MAX, bv_name(bv));
-			else
-				hist_print((struct hist *)map, bv_name(bv));
+			if (bv->bv_type == B_VT_MAPHIST) {
+				if (bt_json)
+					map_hist_print_json(map, bv_name(bv));
+				else
+					map_hist_print(map, bv_name(bv));
+			} else if (ba->ba_type == B_AT_MAP) {
+				if (bt_json)
+					map_print_json(map, SIZE_T_MAX,
+					    bv_name(bv));
+				else
+					map_print(map, SIZE_T_MAX, bv_name(bv));
+			} else {
+				if (bt_json)
+					hist_print_json((struct hist *)map,
+					    bv_name(bv));
+				else
+					hist_print((struct hist *)map,
+					    bv_name(bv));
+			}
 			map_clear(map);
 			bv->bv_value = NULL;
 		}
@@ -2445,13 +2462,22 @@ stmt_print(struct bt_stmt *bs, struct dt_evt *dtev)
 	debug("map=%p '%s' print (top=%d)\n", bv->bv_value, bv_name(bv), top);
 
 	if (bv->bv_type == B_VT_MAP) {
-		map_print(map, top, bv_name(bv));
+		if (bt_json)
+			map_print_json(map, top, bv_name(bv));
+		else
+			map_print(map, top, bv_name(bv));
 		bv->bv_printed = 1;
 	} else if (bv->bv_type == B_VT_HIST) {
-		hist_print((struct hist *)map, bv_name(bv));
+		if (bt_json)
+			hist_print_json((struct hist *)map, bv_name(bv));
+		else
+			hist_print((struct hist *)map, bv_name(bv));
 		bv->bv_printed = 1;
 	} else if (bv->bv_type == B_VT_MAPHIST) {
-		map_hist_print(map, bv_name(bv));
+		if (bt_json)
+			map_hist_print_json(map, bv_name(bv));
+		else
+			map_hist_print(map, bv_name(bv));
 		bv->bv_printed = 1;
 	} else
 		printf("@%s: %s\n", bv_name(bv), ba2str(ba, dtev));

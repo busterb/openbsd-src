@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+#
+# bviz - real-time btrace histogram visualizer
+#
+# Reads NDJSON from btrace -j output and renders live heatmaps and charts.
+#
+# Usage:
+#   btrace -j -e 'script' | bviz
+#   btrace -j script.bt | bviz
+#
+# Supported types emitted by btrace -j:
+#   maphist  @map[key] = hist(v)  -> 2-D heatmap (rows=keys, cols=buckets)
+#   hist     @h = hist(v)         -> bar chart
+#   map      @map[key] = count()  -> bar chart sorted by value
+
+import json
+import sys
+import time
+
+ESC   = '\033'
+RESET = ESC + '[0m'
+BOLD  = ESC + '[1m'
+CLEAR = ESC + '[2J' + ESC + '[H'
+
+# Intensity characters (low to high)
+_INTENSITY = ['.', '\u2591', '\u2592', '\u2593', '\u2588']  # . ░ ▒ ▓ █
+
+def _intensity(val, row_max):
+    """Map val/row_max to a single display character."""
+    if row_max == 0 or val == 0:
+        return _INTENSITY[0]
+    r = val / row_max
+    if r < 0.05:
+        return _INTENSITY[1]
+    elif r < 0.20:
+        return _INTENSITY[2]
+    elif r < 0.60:
+        return _INTENSITY[3]
+    else:
+        return _INTENSITY[4]
+
+def _fmt_bucket(key_int, step):
+    """
+    Format a histogram bucket label.
+    For power-of-2 (step==0), key is the upper bound of [key/2, key).
+    For linear (step>0), key is the upper bound of [key-step, key).
+    """
+    k = key_int
+    if step == 0:
+        if k < 0:
+            return '<0'
+        elif k == 0:
+            return '0'
+        else:
+            # upper bound; apply unit suffix
+            v = k
+            for unit, suffix in ((1 << 60, 'E'), (1 << 50, 'P'),
+                                  (1 << 40, 'T'), (1 << 30, 'G'),
+                                  (1 << 20, 'M'), (1 << 10, 'K')):
+                if v >= unit:
+                    return f'{v // unit}{suffix}'
+            return str(v)
+    else:
+        return f'{k - step}-{k}'
+
+
+def render_maphist(obj):
+    """2-D heatmap: rows = outer map keys, cols = histogram buckets."""
+    name  = obj['name']
+    data  = obj['data']
+    step  = obj.get('step', 0)
+    ts    = obj.get('ts', 0)
+
+    if not data:
+        return
+
+    # Collect all bucket keys across all entries
+    all_buckets = set()
+    for entry in data.values():
+        all_buckets.update(int(k) for k in entry.keys())
+    sorted_buckets = sorted(all_buckets)
+
+    # Sort outer keys numerically where possible
+    try:
+        sorted_keys = sorted(data.keys(), key=int)
+    except ValueError:
+        sorted_keys = sorted(data.keys())
+
+    ts_str = time.strftime('%H:%M:%S', time.localtime(ts))
+    print(f'{BOLD}@{name}{RESET}  [{ts_str}]')
+
+    # Column header
+    key_w   = max(len(str(k)) for k in sorted_keys)
+    col_w   = 5
+    header  = ' ' * (key_w + 1) + '|'
+    for b in sorted_buckets:
+        lbl = _fmt_bucket(b, step)
+        header += f'{lbl:^{col_w}}'
+    header += '  total'
+    print(header)
+    print('-' * (key_w + 1) + '+' + '-' * (col_w * len(sorted_buckets) + 7))
+
+    for key in sorted_keys:
+        entry   = {int(k): v for k, v in data[key].items()}
+        row_max = max(entry.values(), default=0)
+        total   = sum(entry.values())
+
+        row = f'{key:>{key_w}} |'
+        for b in sorted_buckets:
+            val = entry.get(b, 0)
+            ch  = _intensity(val, row_max)
+            row += f'{ch:^{col_w}}'
+        row += f'  {total}'
+        print(row)
+
+
+def render_hist(obj):
+    """Single histogram as a bar chart."""
+    name = obj['name']
+    data = {int(k): v for k, v in obj['data'].items()}
+    step = obj.get('step', 0)
+    ts   = obj.get('ts', 0)
+
+    if not data:
+        return
+
+    sorted_buckets = sorted(data.keys())
+    max_val   = max(data.values(), default=0)
+    bar_width = 48
+    ts_str    = time.strftime('%H:%M:%S', time.localtime(ts))
+
+    print(f'{BOLD}@{name}{RESET}  [{ts_str}]')
+    for b in sorted_buckets:
+        val = data[b]
+        lbl = _fmt_bucket(b, step)
+        i   = int(bar_width * val / max_val) if max_val > 0 else 0
+        print(f'{lbl:>8} {val:8d} |{"#" * i}{" " * (bar_width - i)}|')
+
+
+def render_map(obj):
+    """Simple map as a bar chart sorted by descending value."""
+    name = obj['name']
+    data = obj['data']
+    ts   = obj.get('ts', 0)
+
+    if not data:
+        return
+
+    try:
+        items = sorted(data.items(), key=lambda x: -int(x[1]))
+    except (ValueError, TypeError):
+        items = sorted(data.items())
+
+    max_val   = int(items[0][1]) if items else 0
+    bar_width = 48
+    ts_str    = time.strftime('%H:%M:%S', time.localtime(ts))
+
+    print(f'{BOLD}@{name}{RESET}  [{ts_str}]')
+    for key, val in items:
+        v = int(val)
+        i = int(bar_width * v / max_val) if max_val > 0 else 0
+        print(f'{key:>16} {v:8d} |{"#" * i}{" " * (bar_width - i)}|')
+
+
+def main():
+    # sections: name -> last received JSON object
+    sections = {}
+
+    print(CLEAR, end='', flush=True)
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            # Pass through non-JSON lines (e.g. printf output) to stderr
+            print(line, file=sys.stderr)
+            continue
+
+        name = obj.get('name', '?')
+        sections[name] = obj
+
+        # Redraw all sections from top
+        print(CLEAR, end='')
+        for n, o in sections.items():
+            t = o.get('type')
+            if t == 'maphist':
+                render_maphist(o)
+            elif t == 'hist':
+                render_hist(o)
+            elif t == 'map':
+                render_map(o)
+            print()
+        sys.stdout.flush()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(RESET)
+        sys.exit(0)
