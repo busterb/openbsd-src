@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "bt_parser.h"
 #include "btrace.h"
@@ -428,4 +429,132 @@ map_hist_print(struct map *map, const char *name)
 		snprintf(header, sizeof(header), "@%s[%s]", name, mep->mkey);
 		hist_print_inner(hist, header);
 	}
+}
+
+/*
+ * JSON output functions (-j flag).
+ * Emit one NDJSON object per print() call; one JSON object per line.
+ *
+ * hist bucket keys are stored as decimal strings (the upper bound of
+ * the interval).  We iterate them in ascending numeric order, matching
+ * the display order of hist_print_inner.
+ */
+
+static void
+hist_json_inner(struct hist *hist)
+{
+	struct map *map = &hist->hmap;
+	struct mentry *mep, *mcur;
+	long long bprev, bmin, bin;
+	long val;
+	int first = 1;
+
+	bprev = LLONG_MIN;
+	for (;;) {
+		mcur = NULL;
+		bmin = LLONG_MAX;
+
+		RB_FOREACH(mep, map, map) {
+			bin = atoll(mep->mkey);
+			if (bin <= bmin && bin > bprev) {
+				mcur = mep;
+				bmin = bin;
+			}
+		}
+		if (mcur == NULL)
+			break;
+
+		bin = atoll(mcur->mkey);
+		val = ba2long(mcur->mval, NULL);
+		if (!first)
+			printf(",");
+		printf("\"%lld\":%ld", bin, val);
+		first = 0;
+		bprev = bin;
+	}
+}
+
+void
+hist_print_json(struct hist *hist, const char *name)
+{
+	time_t ts = time(NULL);
+
+	printf("{\"type\":\"hist\",\"name\":\"%s\",\"ts\":%lld,\"step\":%d,\"data\":{",
+	    name, (long long)ts, hist->hstep);
+	hist_json_inner(hist);
+	printf("}}\n");
+	fflush(stdout);
+}
+
+void
+map_print_json(struct map *map, size_t top, const char *name)
+{
+	struct mentry **elms, *mep;
+	size_t i, count = 0;
+	time_t ts = time(NULL);
+
+	if (map == NULL)
+		return;
+
+	RB_FOREACH(mep, map, map)
+		count++;
+
+	elms = calloc(count, sizeof(*elms));
+	if (elms == NULL)
+		err(1, NULL);
+
+	count = 0;
+	RB_FOREACH(mep, map, map)
+		elms[count++] = mep;
+
+	qsort(elms, count, sizeof(*elms), map_cmp);
+
+	printf("{\"type\":\"map\",\"name\":\"%s\",\"ts\":%lld,\"data\":{",
+	    name, (long long)ts);
+	for (i = 0; i < top && i < count; i++) {
+		mep = elms[i];
+		if (i > 0)
+			printf(",");
+		printf("\"%s\":%ld", mep->mkey, ba2long(mep->mval, NULL));
+	}
+	printf("}}\n");
+	fflush(stdout);
+	free(elms);
+}
+
+void
+map_hist_print_json(struct map *map, const char *name)
+{
+	struct mentry *mep;
+	time_t ts = time(NULL);
+	int step = 0, first = 1;
+
+	if (map == NULL)
+		return;
+
+	/* All entries share the same step; get it from the first non-null hist. */
+	RB_FOREACH(mep, map, map) {
+		struct hist *h = (struct hist *)mep->mval;
+		if (h != NULL) {
+			step = h->hstep;
+			break;
+		}
+	}
+
+	printf("{\"type\":\"maphist\",\"name\":\"%s\",\"ts\":%lld,\"step\":%d,\"data\":{",
+	    name, (long long)ts, step);
+
+	RB_FOREACH(mep, map, map) {
+		struct hist *hist = (struct hist *)mep->mval;
+		if (hist == NULL)
+			continue;
+		if (!first)
+			printf(",");
+		printf("\"%s\":{", mep->mkey);
+		hist_json_inner(hist);
+		printf("}");
+		first = 0;
+	}
+	printf("}}\n");
+	fflush(stdout);
 }
