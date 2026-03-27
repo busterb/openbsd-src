@@ -13,9 +13,13 @@
  *    - 3: locked after sleeping
  *    - 4: locking failed
  *
- * To produce a FlameGraph process the output with stackcollapse-bpftrace.pl
- * and flamegraph.pl found in:
- *	https://github.com/brendangregg/FlameGraph
+ * Live flame graph in the terminal (Ctrl+C to stop):
+ *	btrace -V /usr/share/btrace/solock.bt
+ *
+ * To produce a FlameGraph SVG using the FlameGraph tools at
+ * https://github.com/brendangregg/FlameGraph:
+ *	btrace /usr/share/btrace/solock.bt > solock.txt
+ *	stackcollapse-bpftrace.pl solock.txt | flamegraph.pl > solock.svg
  */
 tracepoint:rwlock:solock {
 	if (arg2 >= 2) {
