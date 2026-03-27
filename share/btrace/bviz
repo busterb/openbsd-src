@@ -14,6 +14,7 @@
 #   map      @map[key] = count()  -> bar chart sorted by value
 
 import json
+import os
 import sys
 import time
 
@@ -137,11 +138,119 @@ def render_hist(obj):
         print(f'{lbl:>8} {val:8d} |{"#" * i}{" " * (bar_width - i)}|')
 
 
-def render_map(obj):
-    """Simple map as a bar chart sorted by descending value."""
+def _parse_stack(key_str):
+    """
+    Parse a btrace kstack/ustack key into a list of frame names,
+    outermost (root-ward) first.
+
+    btrace formats each frame as '\nfuncname+0xOFFSET'; the final
+    frame is '\nkernel\n' or '\nuserland\n'.  We strip offsets and
+    reverse so the outermost frame comes first (root at top in the
+    icicle chart).
+    """
+    frames = []
+    for f in key_str.split('\n'):
+        f = f.strip()
+        if not f:
+            continue
+        # strip +0xOFFSET
+        plus = f.find('+')
+        if plus > 0:
+            f = f[:plus]
+        frames.append(f)
+    frames.reverse()
+    return frames
+
+
+def _build_flame_tree(data):
+    """
+    Build a prefix tree from {stack_str: count}.
+    Each node: {'total': N, 'children': {name: node}}.
+    """
+    root = {'total': 0, 'children': {}}
+    for key_str, count in data.items():
+        count = int(count)
+        frames = _parse_stack(key_str)
+        root['total'] += count
+        node = root
+        for frame in frames:
+            if frame not in node['children']:
+                node['children'][frame] = {'total': 0, 'children': {}}
+            node = node['children'][frame]
+            node['total'] += count
+    return root
+
+
+def _flame_row(level, width):
+    """Render one level of the icicle chart as a string of `width` chars."""
+    buf = [' '] * width
+    for x, w, label, node, total in level:
+        if w < 2:
+            if w == 1 and x < width:
+                buf[x] = '|'
+            continue
+        buf[x] = '|'
+        inner = w - 1
+        pct = node['total'] * 100 // total
+        suffix = f' {pct}%'
+        s = (label + suffix) if len(label) + len(suffix) <= inner else label
+        for i, ch in enumerate(s[:inner]):
+            if x + 1 + i < width:
+                buf[x + 1 + i] = ch
+    return ''.join(buf[:width])
+
+
+def render_flamegraph(obj):
+    """Render a map of stack traces as an icicle chart (root at top)."""
     name = obj['name']
     data = obj['data']
     ts   = obj.get('ts', 0)
+
+    try:
+        width = os.get_terminal_size().columns
+    except OSError:
+        width = 80
+
+    ts_str = time.strftime('%H:%M:%S', time.localtime(ts))
+    print(f'{BOLD}@{name}{RESET}  [{ts_str}]')
+
+    root = _build_flame_tree(data)
+    total = root['total']
+    if total == 0:
+        return
+
+    # Each entry: (x_start, width, label, node, total_samples)
+    level = [(0, width, 'all', root, total)]
+    while level:
+        print(_flame_row(level, width))
+        next_level = []
+        for x, w, _label, node, _total in level:
+            children = sorted(node['children'].items(),
+                              key=lambda kv: -kv[1]['total'])
+            cx = x
+            rem = w
+            for cname, cnode in children:
+                cw = max(1, round(w * cnode['total'] / node['total']))
+                cw = min(cw, rem)
+                if cw > 0:
+                    next_level.append((cx, cw, cname, cnode, total))
+                    cx += cw
+                    rem -= cw
+                if rem <= 0:
+                    break
+        level = next_level
+
+
+def render_map(obj):
+    """Map as a bar chart, or a flame graph if keys are stack traces."""
+    name = obj['name']
+    data = obj['data']
+    ts   = obj.get('ts', 0)
+
+    # kstack/ustack keys contain '\n'-separated frames
+    if data and any('\n' in k for k in data):
+        render_flamegraph(obj)
+        return
 
     if not data:
         return
