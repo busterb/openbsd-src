@@ -422,6 +422,41 @@ map_hist_print(struct map *map, const char *name)
  * the display order of hist_print_inner.
  */
 
+/*
+ * Emit a JSON string with proper escaping.
+ * Handles newlines (common in kstack/ustack keys), quotes, and backslashes.
+ */
+static void
+json_puts_str(const char *s)
+{
+	putchar('"');
+	for (; *s != '\0'; s++) {
+		switch (*s) {
+		case '"':
+			printf("\\\"");
+			break;
+		case '\\':
+			printf("\\\\");
+			break;
+		case '\n':
+			printf("\\n");
+			break;
+		case '\r':
+			printf("\\r");
+			break;
+		case '\t':
+			printf("\\t");
+			break;
+		default:
+			if ((unsigned char)*s < 0x20)
+				printf("\\u%04x", (unsigned char)*s);
+			else
+				putchar(*s);
+		}
+	}
+	putchar('"');
+}
+
 static void
 hist_json_inner(struct hist *hist)
 {
@@ -497,7 +532,8 @@ map_print_json(struct map *map, size_t top, const char *name)
 		mep = elms[i];
 		if (i > 0)
 			printf(",");
-		printf("\"%s\":%ld", mep->mkey, ba2long(mep->mval, NULL));
+		json_puts_str(mep->mkey);
+		printf(":%ld", ba2long(mep->mval, NULL));
 	}
 	printf("}}\n");
 	fflush(stdout);
@@ -532,7 +568,8 @@ map_hist_print_json(struct map *map, const char *name)
 			continue;
 		if (!first)
 			printf(",");
-		printf("\"%s\":{", mep->mkey);
+		json_puts_str(mep->mkey);
+		printf(":{");
 		hist_json_inner(hist);
 		printf("}");
 		first = 0;
