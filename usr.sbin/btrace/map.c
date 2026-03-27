@@ -33,17 +33,7 @@
 
 #include "bt_parser.h"
 #include "btrace.h"
-
-struct map {
-	struct mentry		*rbh_root;	/* RB_HEAD(map, mentry) */
-	size_t			 nentries;
-};
-
-struct mentry {
-	RB_ENTRY(mentry)	 mlink;
-	char			 mkey[KLEN];
-	struct bt_arg		*mval;
-};
+#include "map.h"
 
 int		 mcmp(const struct mentry *, const struct mentry *);
 struct mentry	*mget(struct map *, const char *);
@@ -218,14 +208,6 @@ map_zero(struct map *map)
 		mep->mval->ba_type = B_AT_LONG;
 	}
 }
-
-/*
- * Histogram implemented with map.
- */
-struct hist {
-	struct map	hmap;
-	int		hstep;
-};
 
 struct hist *
 hist_new(long step)

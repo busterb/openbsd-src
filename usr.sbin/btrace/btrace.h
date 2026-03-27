@@ -73,6 +73,12 @@ void			 map_hist_print_json(struct map *, const char *);
 
 /* btrace.c */
 extern int		 bt_json;
+extern int		 bt_tui;
+
+/* tui.c */
+void			 tui_hist_print(struct hist *, const char *);
+void			 tui_map_print(struct map *, size_t, const char *);
+void			 tui_map_hist_print(struct map *, const char *);
 
 #define KLEN	1024	/* # of characters in map key, contain a stack trace */
 #define STRLEN	1024	/* maximum # of bytes to output via str() function */
