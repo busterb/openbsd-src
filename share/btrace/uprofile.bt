@@ -5,12 +5,8 @@
  *
  * The PID to profile is passed as the first argument.  The process must
  * be compiled with -fno-omit-frame-pointer for stack unwinding to work.
- *
- * Live flame graph in the terminal (icicle chart, Ctrl+C to stop):
- *	btrace -V /usr/share/btrace/uprofile.bt 12345
- *
- * Live flame graph via bviz (requires bviz in PATH):
- *	btrace -j /usr/share/btrace/uprofile.bt 12345 | bviz
+ * Collects samples until Ctrl+C; for a live rolling flame graph use
+ * uflamegraph.bt instead.
  *
  * To produce a FlameGraph SVG using the FlameGraph tools at
  * https://github.com/brendangregg/FlameGraph:
