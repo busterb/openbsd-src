@@ -23,9 +23,10 @@
  * open_memstream(3), updates the section list, then redraws all sections.
  * Multiple print() calls per interval accumulate naturally.
  *
- * maphist (@map[k] = hist(v)):  2-D heatmap — rows=outer keys, cols=buckets
- * hist    (@h = hist(v)):       horizontal bar chart
- * map     (@map[k] = count()):  bar chart sorted by value
+ * maphist  (@map[k] = hist(v)):    2-D heatmap — rows=outer keys, cols=buckets
+ * hist     (@h = hist(v)):         horizontal bar chart
+ * map      (@map[k] = count()):    bar chart sorted by value
+ * stackmap (@map[kstack] = count()): icicle chart (flame graph), width adapts
  *
  * Column width is fixed at TUI_COL_W display columns.  Unicode block chars
  * are exactly 1 display column wide; we emit them with explicit surrounding
@@ -33,6 +34,7 @@
  * works without wcwidth(3).
  */
 
+#include <sys/ioctl.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
 
@@ -42,6 +44,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "bt_parser.h"
 #include "btrace.h"
@@ -400,6 +403,273 @@ tui_hist_print(struct hist *hist, const char *name)
 	tui_redraw();
 }
 
+/*
+ * Flame graph (icicle chart) for stack trace maps (@map[kstack] = count()).
+ *
+ * A prefix tree is built from the newline-delimited frame strings stored as
+ * map keys (btrace format: "\nfunc+0xNN\n..." innermost-first).  Frames are
+ * inserted outermost-first so the root represents the whole call tree.
+ * The tree is then rendered level-by-level; each node's box width is
+ * proportional to its share of total samples.
+ */
+
+struct flame_node {
+	char			*fn_name;
+	long			 fn_total;
+	struct flame_node	**fn_children;
+	size_t			 fn_nchildren;
+	size_t			 fn_childcap;
+};
+
+/* One rendered box at a given tree level. */
+struct flame_box {
+	int			 fb_x;
+	int			 fb_w;
+	struct flame_node	*fb_node;
+};
+
+static struct flame_node *
+flame_node_new(const char *name, size_t namelen)
+{
+	struct flame_node *fn;
+
+	fn = calloc(1, sizeof(*fn));
+	if (fn == NULL)
+		err(1, NULL);
+	fn->fn_name = strndup(name, namelen);
+	if (fn->fn_name == NULL)
+		err(1, NULL);
+	return fn;
+}
+
+static void
+flame_node_free(struct flame_node *fn)
+{
+	size_t i;
+
+	for (i = 0; i < fn->fn_nchildren; i++)
+		flame_node_free(fn->fn_children[i]);
+	free(fn->fn_children);
+	free(fn->fn_name);
+	free(fn);
+}
+
+/* Find or create a child of fn with the given name. */
+static struct flame_node *
+flame_child_get(struct flame_node *fn, const char *name, size_t namelen)
+{
+	struct flame_node *child, **tmp;
+	size_t i;
+
+	for (i = 0; i < fn->fn_nchildren; i++) {
+		if (strncmp(fn->fn_children[i]->fn_name, name, namelen) == 0 &&
+		    fn->fn_children[i]->fn_name[namelen] == '\0')
+			return fn->fn_children[i];
+	}
+	child = flame_node_new(name, namelen);
+	if (fn->fn_nchildren >= fn->fn_childcap) {
+		fn->fn_childcap = fn->fn_childcap ? fn->fn_childcap * 2 : 4;
+		tmp = reallocarray(fn->fn_children, fn->fn_childcap,
+		    sizeof(*tmp));
+		if (tmp == NULL)
+			err(1, NULL);
+		fn->fn_children = tmp;
+	}
+	fn->fn_children[fn->fn_nchildren++] = child;
+	return child;
+}
+
+/*
+ * Parse key (btrace kstack/ustack: "\nfunc+0xNN\n..." innermost-first)
+ * and insert into the prefix tree outermost-first, accumulating count.
+ */
+static void
+flame_insert(struct flame_node *root, const char *key, long count)
+{
+	const char	*frames[64];
+	size_t		 framelens[64];
+	int		 nframes = 0, i;
+	const char	*p = key;
+
+	while (*p != '\0' && nframes < 64) {
+		while (*p == '\n')
+			p++;
+		if (*p == '\0')
+			break;
+		const char *end = p;
+		while (*end != '\0' && *end != '\n')
+			end++;
+		size_t len = end - p;
+		/* strip +0xOFFSET */
+		const char *plus = memchr(p, '+', len);
+		if (plus != NULL)
+			len = plus - p;
+		if (len > 0) {
+			frames[nframes] = p;
+			framelens[nframes] = len;
+			nframes++;
+		}
+		p = end;
+	}
+
+	/* Walk outermost-first (reversed) to build root-down tree. */
+	root->fn_total += count;
+	struct flame_node *node = root;
+	for (i = nframes - 1; i >= 0; i--) {
+		node = flame_child_get(node, frames[i], framelens[i]);
+		node->fn_total += count;
+	}
+}
+
+static int
+flame_node_cmp(const void *a, const void *b)
+{
+	const struct flame_node *fa = *(const struct flame_node * const *)a;
+	const struct flame_node *fb = *(const struct flame_node * const *)b;
+
+	return (fa->fn_total < fb->fn_total) - (fa->fn_total > fb->fn_total);
+}
+
+/*
+ * Render the icicle chart level-by-level into fp.
+ * Each box: '|' + label (truncated) + percentage, proportional width.
+ */
+static void
+tui_flame_render(FILE *fp, struct flame_node *root, int width)
+{
+	struct flame_box	*cur = NULL, *nxt = NULL;
+	size_t			 ncur, nnxt, nxtcap;
+	char			*row;
+	long			 total = root->fn_total;
+	size_t			 i;
+
+	if (total == 0 || width < 2)
+		return;
+
+	row = malloc(width + 1);
+	if (row == NULL)
+		err(1, NULL);
+
+	cur = calloc(1, sizeof(*cur));
+	if (cur == NULL)
+		err(1, NULL);
+	cur[0].fb_x    = 0;
+	cur[0].fb_w    = width;
+	cur[0].fb_node = root;
+	ncur   = 1;
+	nnxt   = 0;
+	nxtcap = 0;
+
+	while (ncur > 0) {
+		/* Render this level. */
+		memset(row, ' ', width);
+		row[width] = '\0';
+		for (i = 0; i < ncur; i++) {
+			int x = cur[i].fb_x, w = cur[i].fb_w;
+			struct flame_node *fn = cur[i].fb_node;
+			int inner, pct, l;
+			char label[128];
+
+			if (x >= width || w < 1)
+				continue;
+			row[x] = '|';
+			if (w < 3)
+				continue;
+			inner = (x + w > width) ? width - x - 1 : w - 1;
+			pct   = (int)(fn->fn_total * 100 / total);
+			l = snprintf(label, sizeof(label), "%s %d%%",
+			    fn->fn_name, pct);
+			if (l < 0 || l > inner)
+				l = snprintf(label, sizeof(label), "%s",
+				    fn->fn_name);
+			if (l < 0)
+				l = 0;
+			if (l > inner)
+				l = inner;
+			memcpy(row + x + 1, label, l);
+		}
+		fprintf(fp, "%s\n", row);
+
+		/* Build next level. */
+		nnxt = 0;
+		for (i = 0; i < ncur; i++) {
+			int x = cur[i].fb_x, w = cur[i].fb_w;
+			struct flame_node *fn = cur[i].fb_node;
+			int cx = x, rem = w;
+			size_t j;
+
+			if (fn->fn_nchildren == 0)
+				continue;
+			qsort(fn->fn_children, fn->fn_nchildren,
+			    sizeof(*fn->fn_children), flame_node_cmp);
+			for (j = 0; j < fn->fn_nchildren && rem > 0; j++) {
+				struct flame_node *child = fn->fn_children[j];
+				struct flame_box  *tmp;
+				int cw = (int)((long)w * child->fn_total /
+				    fn->fn_total);
+				if (cw < 1)
+					cw = 1;
+				if (cw > rem)
+					cw = rem;
+				if (nnxt >= nxtcap) {
+					nxtcap = nxtcap ? nxtcap * 2 : 8;
+					tmp = reallocarray(nxt, nxtcap,
+					    sizeof(*tmp));
+					if (tmp == NULL)
+						err(1, NULL);
+					nxt = tmp;
+				}
+				nxt[nnxt].fb_x    = cx;
+				nxt[nnxt].fb_w    = cw;
+				nxt[nnxt].fb_node = child;
+				nnxt++;
+				cx  += cw;
+				rem -= cw;
+			}
+		}
+
+		free(cur);
+		cur    = nxt;
+		ncur   = nnxt;
+		nxt    = NULL;
+		nnxt   = 0;
+		nxtcap = 0;
+	}
+	free(row);
+	/* cur == NULL here (was swapped from nxt which was reset) */
+}
+
+static void
+tui_flame_print(struct map *map, const char *name)
+{
+	struct flame_node *root;
+	struct mentry *mep;
+	struct winsize ws;
+	char *buf;
+	size_t bufsz;
+	FILE *fp;
+	int width = 80;
+
+	fp = open_memstream(&buf, &bufsz);
+	if (fp == NULL)
+		err(1, "open_memstream");
+
+	root = flame_node_new("all", 3);
+	RB_FOREACH(mep, map, map)
+		flame_insert(root, mep->mkey, ba2long(mep->mval, NULL));
+
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 1)
+		width = (int)ws.ws_col - 1;
+
+	fprintf(fp, TUI_BOLD "@%s" TUI_RESET "\n", name);
+	tui_flame_render(fp, root, width);
+	fclose(fp);
+
+	flame_node_free(root);
+	tui_section_update(name, buf);
+	tui_redraw();
+}
+
 void
 tui_map_print(struct map *map, size_t top, const char *name)
 {
@@ -413,6 +683,15 @@ tui_map_print(struct map *map, size_t top, const char *name)
 
 	if (map == NULL)
 		return;
+
+	/* kstack/ustack keys contain '\n'-separated frames. */
+	RB_FOREACH(mep, map, map) {
+		if (strchr(mep->mkey, '\n') != NULL) {
+			tui_flame_print(map, name);
+			return;
+		}
+		break;
+	}
 
 	fp = open_memstream(&buf, &bufsz);
 	if (fp == NULL)
