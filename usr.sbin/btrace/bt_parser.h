@@ -249,15 +249,32 @@ struct bt_subscript {
 #define BSS_SLOT_UNSET	0xff		/* bss_slot sentinel: not yet assigned */
 
 /*
- * Type cast node: (type *)expr.
+ * Scalar integer types for casts: (int32_t)expr, (uint16_t)expr, etc.
+ * B_SCTYPE_NONE means this is a pointer cast (bca_type is used instead).
+ */
+enum bt_stype {
+	B_SCTYPE_NONE	= 0,
+	B_SCTYPE_INT8,
+	B_SCTYPE_INT16,
+	B_SCTYPE_INT32,
+	B_SCTYPE_UINT8,
+	B_SCTYPE_UINT16,
+	B_SCTYPE_UINT32,
+};
+
+/*
+ * Type cast node: (type *)expr or (int32_t)expr.
  *
- * bca_type names the pointed-to type (e.g. "struct sockaddr_in").
- * bca_expr is the expression whose pointer value is being reinterpreted.
- * Used as the base of a B_AT_FN_DEREF or B_AT_FN_SUBSCRIPT node to override
- * the CTF type used for field/element resolution.
+ * For pointer casts, bca_type names the pointed-to type and bca_stype is
+ * B_SCTYPE_NONE.  Used as the base of a B_AT_FN_DEREF or B_AT_FN_SUBSCRIPT
+ * node to override the CTF type used for field/element resolution.
+ *
+ * For scalar casts, bca_stype names the target integer type and bca_type
+ * is NULL.  The evaluator sign- or zero-extends the value accordingly.
  */
 struct bt_cast {
-	const char		*bca_type;	/* pointed-to type name */
+	const char		*bca_type;	/* pointed-to type name (pointer cast) */
+	int			 bca_stype;	/* target scalar type (scalar cast) */
 	struct bt_arg		*bca_expr;	/* base expression */
 };
 
