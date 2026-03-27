@@ -137,6 +137,8 @@ static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 %token	<v.i>		OP_INC OP_DEC
 /* Builtins */
 %token	<v.i>		BUILTIN BEGIN BREAK CONTINUE ELSE END FOR IF KSYM LEN NTOP SIZEOF STR STRNCMP USYM WHILE
+/* Scalar integer cast types: (int32_t)expr, (uint16_t)expr, etc. */
+%token	<v.i>		SCTYPE
 /* Functions and Map operators */
 %token  <v.i>		F_DELETE F_PRINT
 %token	<v.i>		MFUNC FUNC0 FUNC1 FUNCN OP1 OP2 OP4 MOP0 MOP1
@@ -240,6 +242,7 @@ variable: LVAR			{ $$ = bl_find($1); }
 factor : '(' expr ')'		{ $$ = $2; }
 	| '(' vargs ',' expr ')'{ $$ = ba_new(ba_append($2, $4), B_AT_TUPLE); }
 	| '(' typename '*' ')' factor	{ $$ = bca_new($2, $5); }
+	| '(' SCTYPE ')' factor	{ $$ = bca_stype_new($2, $4); }
 	| NUMBER		{ $$ = ba_new($1, B_AT_LONG); }
 	| BUILTIN		{ $$ = ba_new(NULL, $1); }
 	| CSTRING		{ $$ = ba_new($1, B_AT_STR); }
@@ -273,6 +276,7 @@ typename : STRING			{ $$ = $1; }
 		snprintf(s, len, "%s %s", $1, $2);
 		$$ = s;
 	}
+	| SCTYPE			{ $$ = sctype_name($1); }
 	;
 
 vargs	: expr
@@ -1015,6 +1019,23 @@ btern_new(struct bt_arg *cond, struct bt_arg *then_ba, struct bt_arg *else_ba)
 }
 
 /*
+ * Map a B_SCTYPE_xxx value to its C type name string.
+ */
+const char *
+sctype_name(int stype)
+{
+	switch (stype) {
+	case B_SCTYPE_INT8:	return "int8_t";
+	case B_SCTYPE_INT16:	return "int16_t";
+	case B_SCTYPE_INT32:	return "int32_t";
+	case B_SCTYPE_UINT8:	return "uint8_t";
+	case B_SCTYPE_UINT16:	return "uint16_t";
+	case B_SCTYPE_UINT32:	return "uint32_t";
+	default:		return "?";
+	}
+}
+
+/*
  * Type cast: (type *)expr
  */
 struct bt_arg *
@@ -1026,6 +1047,24 @@ bca_new(const char *type, struct bt_arg *expr)
 	if (bca == NULL)
 		err(1, "bt_cast: calloc");
 	bca->bca_type = type;
+	bca->bca_stype = B_SCTYPE_NONE;
+	bca->bca_expr = expr;
+
+	return ba_new(bca, B_AT_FN_CAST);
+}
+
+/*
+ * Scalar integer cast: (int32_t)expr, (uint16_t)expr, etc.
+ */
+struct bt_arg *
+bca_stype_new(int stype, struct bt_arg *expr)
+{
+	struct bt_cast *bca;
+
+	bca = calloc(1, sizeof(*bca));
+	if (bca == NULL)
+		err(1, "bt_cast: calloc");
+	bca->bca_stype = stype;
 	bca->bca_expr = expr;
 
 	return ba_new(bca, B_AT_FN_CAST);
@@ -1095,6 +1134,9 @@ lookup(char *s)
 		{ "gid",	BUILTIN,	B_AT_BI_GID },
 		{ "hist",	OP1,		0 },
 		{ "if",		IF,		0 },
+		{ "int16_t",	SCTYPE,		B_SCTYPE_INT16 },
+		{ "int32_t",	SCTYPE,		B_SCTYPE_INT32 },
+		{ "int8_t",	SCTYPE,		B_SCTYPE_INT8 },
 		{ "kstack",	BUILTIN,	B_AT_BI_KSTACK },
 		{ "ksym",	KSYM,		B_AT_FN_KSYM },
 		{ "len",	LEN,		B_AT_FN_LEN },
@@ -1116,6 +1158,9 @@ lookup(char *s)
 		{ "tid",	BUILTIN,	B_AT_BI_TID },
 		{ "time",	FUNC1,		B_AC_TIME },
 		{ "uid",	BUILTIN,	B_AT_BI_UID },
+		{ "uint16_t",	SCTYPE,		B_SCTYPE_UINT16 },
+		{ "uint32_t",	SCTYPE,		B_SCTYPE_UINT32 },
+		{ "uint8_t",	SCTYPE,		B_SCTYPE_UINT8 },
 		{ "ustack",	BUILTIN,	B_AT_BI_USTACK },
 		{ "usym",	USYM,		B_AT_FN_USYM },
 		{ "while",	WHILE,		0 },

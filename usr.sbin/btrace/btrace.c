@@ -3095,7 +3095,19 @@ ba_name(struct bt_arg *ba)
 	case B_AT_FN_CAST: {
 		static char buf[64];
 		struct bt_cast *bca = ba->ba_value;
-		snprintf(buf, sizeof(buf), "(%s *)", bca->bca_type);
+		if (bca->bca_stype != B_SCTYPE_NONE) {
+			const char *stnames[] = {
+			    [B_SCTYPE_INT8]   = "int8_t",
+			    [B_SCTYPE_INT16]  = "int16_t",
+			    [B_SCTYPE_INT32]  = "int32_t",
+			    [B_SCTYPE_UINT8]  = "uint8_t",
+			    [B_SCTYPE_UINT16] = "uint16_t",
+			    [B_SCTYPE_UINT32] = "uint32_t",
+			};
+			snprintf(buf, sizeof(buf), "(%s)",
+			    stnames[bca->bca_stype]);
+		} else
+			snprintf(buf, sizeof(buf), "(%s *)", bca->bca_type);
 		return buf;
 	}
 	case B_AT_OP_PLUS:
@@ -3295,7 +3307,16 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	}
 	case B_AT_FN_CAST: {
 		struct bt_cast *bca = ba->ba_value;
-		val = ba2long(bca->bca_expr, dtev);
+		long rawval = ba2long(bca->bca_expr, dtev);
+		switch (bca->bca_stype) {
+		case B_SCTYPE_INT8:	val = (int8_t)rawval;	break;
+		case B_SCTYPE_INT16:	val = (int16_t)rawval;	break;
+		case B_SCTYPE_INT32:	val = (int32_t)rawval;	break;
+		case B_SCTYPE_UINT8:	val = (uint8_t)rawval;	break;
+		case B_SCTYPE_UINT16:	val = (uint16_t)rawval;	break;
+		case B_SCTYPE_UINT32:	val = (uint32_t)rawval;	break;
+		default:		val = rawval;		break;
+		}
 		break;
 	}
 	case B_AT_OP_TERN: {
