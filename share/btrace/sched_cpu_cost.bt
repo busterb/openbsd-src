@@ -1,0 +1,28 @@
+/*	$OpenBSD$	*/
+
+/*
+ * sched_cpu_cost.bt	Analyze sched_proc_to_cpu_cost() per CPU.
+ *
+ * Shows the distribution of scheduling cost values returned for each
+ * candidate CPU.  Lower cost = more preferred by the scheduler.
+ * ci_sched_cost adds a penalty for non-background processes on
+ * efficiency cores, biasing them toward performance cores.
+ */
+
+kprobe:sched_proc_to_cpu_cost:entry {
+	@_cpuid[tid] = arg0->ci_cpuid;
+}
+
+kprobe:sched_proc_to_cpu_cost:return /@_cpuid[tid] >= 0/ {
+	@cost_by_cpu[@_cpuid[tid]] = hist(retval);
+	delete(@_cpuid[tid]);
+}
+
+interval:s:5 {
+	print(@cost_by_cpu);
+	clear(@cost_by_cpu);
+}
+
+END {
+	clear(@_cpuid);
+}
