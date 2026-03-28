@@ -218,6 +218,18 @@ _IC_FG       = 231   # bright white text
 _IC_COL_W    = 20    # total column width (content + 1-char separator)
 _IC_CELL_W   = _IC_COL_W - 1  # usable content width per cell
 
+# Stable color cache: function name -> palette index, persists across renders
+# so that secondary-branch colors don't change between refreshes.
+_ic_color_cache = {}
+_ic_color_next  = [0]  # next palette slot to assign to a new name
+
+def _ic_color(name):
+    """Return a stable palette background color for `name`."""
+    if name not in _ic_color_cache:
+        _ic_color_cache[name] = _ic_color_next[0] % len(_IC_PALETTE)
+        _ic_color_next[0] += 1
+    return _IC_PALETTE[_ic_color_cache[name]]
+
 
 def render_flamegraph(obj):
     """
@@ -260,10 +272,6 @@ def render_flamegraph(obj):
     # items: list of (depth, y0, cell_h, label, node_total, bg_color)
     items = []
 
-    def _name_color(name):
-        """Stable per-name color from the palette."""
-        return _IC_PALETTE[abs(hash(name)) % len(_IC_PALETTE)]
-
     def _collect(node, depth, y_lo, y_hi, label, bg):
         if depth >= max_depth or (y_hi - y_lo) * term_h < 0.5:
             return
@@ -274,18 +282,22 @@ def render_flamegraph(obj):
                           key=lambda kv: -kv[1]['total'])
         span = y_hi - y_lo
         cum  = y_lo
-        for cname, cnode in children:
+        for j, (cname, cnode) in enumerate(children):
             cf = span * cnode['total'] / node['total']
-            _collect(cnode, depth + 1, cum, cum + cf, cname, _name_color(cname))
+            # Largest child inherits parent color (visual continuity).
+            # Every other sibling gets its own stable color by name.
+            child_bg = bg if j == 0 else _ic_color(cname)
+            _collect(cnode, depth + 1, cum, cum + cf, cname, child_bg)
             cum += cf
 
-    # Seed the first visible column from display_root's children.
-    children = sorted(display_root['children'].items(),
-                      key=lambda kv: -kv[1]['total'])
+    # Seed the first visible column; each top-level branch gets its own
+    # stable color (assigned on first appearance, reused on later renders).
+    children_top = sorted(display_root['children'].items(),
+                          key=lambda kv: -kv[1]['total'])
     cum = 0.0
-    for cname, cnode in children:
+    for cname, cnode in children_top:
         cf = cnode['total'] / display_root['total']
-        _collect(cnode, 0, cum, cum + cf, cname, _name_color(cname))
+        _collect(cnode, 0, cum, cum + cf, cname, _ic_color(cname))
         cum += cf
 
     # ── 2. Build character grid ──────────────────────────────────────────
