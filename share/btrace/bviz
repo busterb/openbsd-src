@@ -250,8 +250,19 @@ def render_flamegraph(obj):
     max_depth = max(1, term_w // _IC_COL_W)
 
     # ── 1. Collect layout ────────────────────────────────────────────────
+    # Skip the boring all→kernel (or all→userland) single-child prefix:
+    # any leading node with exactly one child is always shown at 100% and
+    # adds no useful information.
+    display_root = root
+    while len(display_root['children']) == 1:
+        display_root = next(iter(display_root['children'].values()))
+
     # items: list of (depth, y0, cell_h, label, node_total, bg_color)
     items = []
+
+    def _name_color(name):
+        """Stable per-name color from the palette."""
+        return _IC_PALETTE[abs(hash(name)) % len(_IC_PALETTE)]
 
     def _collect(node, depth, y_lo, y_hi, label, bg):
         if depth >= max_depth or (y_hi - y_lo) * term_h < 0.5:
@@ -263,13 +274,19 @@ def render_flamegraph(obj):
                           key=lambda kv: -kv[1]['total'])
         span = y_hi - y_lo
         cum  = y_lo
-        for i, (cname, cnode) in enumerate(children):
+        for cname, cnode in children:
             cf = span * cnode['total'] / node['total']
-            child_bg = _IC_PALETTE[i % len(_IC_PALETTE)] if depth == 0 else bg
-            _collect(cnode, depth + 1, cum, cum + cf, cname, child_bg)
+            _collect(cnode, depth + 1, cum, cum + cf, cname, _name_color(cname))
             cum += cf
 
-    _collect(root, 0, 0.0, 1.0, 'all', _IC_ROOT_BG)
+    # Seed the first visible column from display_root's children.
+    children = sorted(display_root['children'].items(),
+                      key=lambda kv: -kv[1]['total'])
+    cum = 0.0
+    for cname, cnode in children:
+        cf = cnode['total'] / display_root['total']
+        _collect(cnode, 0, cum, cum + cf, cname, _name_color(cname))
+        cum += cf
 
     # ── 2. Build character grid ──────────────────────────────────────────
     bg_grid = [[_IC_EMPTY_BG] * term_w for _ in range(term_h)]
@@ -284,7 +301,7 @@ def render_flamegraph(obj):
             for col in range(x0, x1):
                 bg_grid[row][col] = bg
         pct  = int(node_total * 100 / total)
-        text = f' {label} {pct}%'
+        text = f'{pct:3d}% {label}'
         for i, c in enumerate(text[:_IC_CELL_W]):
             if y0 < term_h:
                 ch_grid[y0][x0 + i] = c
