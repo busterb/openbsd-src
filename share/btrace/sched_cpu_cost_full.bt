@@ -21,8 +21,10 @@ kprobe:sched_proc_to_cpu_cost:entry {
 kprobe:sched_proc_to_cpu_cost:return /@_cpuid[tid] >= 0/ {
 	$cpuid = @_cpuid[tid];
 	$sched_cost = @_sched_cost[tid];
+	$usrpri = @_usrpri[tid];
 
 	@cost_by_cpu[$cpuid] = hist(retval);
+	@cost_by_priority[$usrpri] = hist(retval);
 	@sched_cost_bias[$cpuid] = max($sched_cost);
 	@evals[$cpuid] = count();
 
@@ -34,11 +36,14 @@ kprobe:sched_proc_to_cpu_cost:return /@_cpuid[tid] >= 0/ {
 interval:s:5 {
 	printf("\n--- sched_proc_to_cpu_cost distributions (5s window) ---\n");
 	print(@cost_by_cpu);
+	printf("\n--- cost distribution by p_usrpri (lower pri = higher number) ---\n");
+	print(@cost_by_priority);
 	printf("\n--- ci_sched_cost bias per CPU ---\n");
 	print(@sched_cost_bias);
 	printf("\n--- Evaluations per CPU ---\n");
 	print(@evals);
 	clear(@cost_by_cpu);
+	clear(@cost_by_priority);
 	clear(@sched_cost_bias);
 	clear(@evals);
 }
@@ -47,4 +52,5 @@ END {
 	clear(@_cpuid);
 	clear(@_sched_cost);
 	clear(@_usrpri);
+	clear(@cost_by_priority);
 }

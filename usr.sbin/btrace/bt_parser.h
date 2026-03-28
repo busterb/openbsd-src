@@ -212,10 +212,12 @@ struct bt_arg {
  *   - a B_AT_BI_ARGx node for a direct dereference (arg0->field), or
  *   - a B_AT_FN_DEREF node for a chained dereference (arg0->ptr->field).
  * bd_field names the member to capture.
- * bd_offset, bd_size, bd_typeid, and bd_slot are filled at setup time
- * in btrace.c when CTF type information is resolved per-probe.
+ * bd_offset, bd_size, bd_typeid, bd_signed, and bd_slot are filled at
+ * setup time in btrace.c when CTF type information is resolved per-probe.
  * bd_slot is the index into dtev_mem[] where the captured value is stored;
  * initialized to DTMAXMEMCAPS (not-yet-assigned sentinel).
+ * bd_signed is true if the field's concrete CTF type is a signed integer;
+ * used at eval time to apply correct sign extension for sub-word fields.
  */
 struct bt_deref {
 	struct bt_arg		*bd_base;	/* argN or B_AT_FN_DEREF node */
@@ -224,6 +226,7 @@ struct bt_deref {
 	uint16_t		 bd_size;	/* field size in bytes (set at setup) */
 	uint16_t		 bd_typeid;	/* CTF type ID of this field */
 	uint8_t			 bd_slot;	/* dtev_mem output slot */
+	uint8_t			 bd_signed;	/* non-zero if type is a signed integer */
 };
 
 #define BD_SLOT_UNSET	0xff		/* bd_slot sentinel: not yet assigned */
