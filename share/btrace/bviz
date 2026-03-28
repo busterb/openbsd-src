@@ -13,6 +13,8 @@
 #   maphist  @map[key] = hist(v)  -> 2-D heatmap (rows=keys, cols=buckets)
 #   hist     @h = hist(v)         -> bar chart
 #   map      @map[key] = count()  -> bar chart sorted by value
+#   map      @map[kstack] = count() -> vertical icicle chart (root left,
+#                                      depth right, height ∝ sample count)
 #
 # With --speedscope: accumulates stack samples and writes a speedscope-format
 # JSON file to stdout on exit.  Open the result at https://speedscope.app.
@@ -185,64 +187,130 @@ def _build_flame_tree(data):
     return root
 
 
-def _flame_row(level, width):
-    """Render one level of the icicle chart as a string of `width` chars."""
-    buf = [' '] * width
-    for x, w, label, node, total in level:
-        if w < 2:
-            if w == 1 and x < width:
-                buf[x] = '|'
-            continue
-        buf[x] = '|'
-        inner = w - 1
-        pct = node['total'] * 100 // total
-        suffix = f' {pct}%'
-        s = (label + suffix) if len(label) + len(suffix) <= inner else label
-        for i, ch in enumerate(s[:inner]):
-            if x + 1 + i < width:
-                buf[x + 1 + i] = ch
-    return ''.join(buf[:width])
+# ── Vertical icicle chart ───────────────────────────────────────────────
+# Each column = one call-stack depth level; cell height ∝ sample count.
+# Color is inherited from the depth-1 ancestor so related branches share
+# a hue.  All cells use bright-white foreground on a dark background.
+
+# 256-color backgrounds: dark/medium shades with good white-text contrast.
+_IC_PALETTE = [
+    22,   # dark green
+    18,   # dark navy
+    52,   # dark maroon
+    58,   # dark olive
+    23,   # dark teal
+    53,   # dark purple
+    88,   # dark crimson
+    130,  # dark orange-brown
+    28,   # medium green
+    24,   # medium blue
+    54,   # dark violet
+    94,   # dark gold
+    30,   # dark cyan
+    19,   # blue-purple
+    89,   # dark fuchsia
+    100,  # dark yellow-green
+]
+_IC_ROOT_BG  = 236   # root "all" cell: very dark gray
+_IC_EMPTY_BG = 234   # unused grid cells: near-black
+_IC_SEP_BG   = 232   # column separator: darkest gray
+_IC_FG       = 231   # bright white text
+_IC_COL_W    = 20    # total column width (content + 1-char separator)
+_IC_CELL_W   = _IC_COL_W - 1  # usable content width per cell
 
 
 def render_flamegraph(obj):
-    """Render a map of stack traces as an icicle chart (root at top)."""
-    name = obj['name']
-    data = obj['data']
-    ts   = obj.get('ts', 0)
+    """
+    Vertical icicle chart: root at left, depth grows rightward.
+
+    Each column is a call-stack depth level.  Within a column, sibling
+    cells are stacked top-to-bottom sorted by sample count (most frequent
+    first).  Cell height is proportional to sample count.  Color is
+    assigned per top-level branch and inherited by all descendants.
+    """
+    name  = obj['name']
+    data  = obj['data']
+    ts    = obj.get('ts', 0)
 
     try:
-        width = os.get_terminal_size().columns
+        sz     = os.get_terminal_size()
+        term_h = max(8,  min(sz.lines - 3, 300))
+        term_w = max(40, min(sz.columns,   500))
     except OSError:
-        width = 80
+        term_h, term_w = 40, 120
 
     ts_str = time.strftime('%H:%M:%S', time.localtime(ts))
     print(f'{BOLD}@{name}{RESET}  [{ts_str}]')
 
-    root = _build_flame_tree(data)
+    root  = _build_flame_tree(data)
     total = root['total']
     if total == 0:
         return
 
-    # Each entry: (x_start, width, label, node, total_samples)
-    level = [(0, width, 'all', root, total)]
-    while level:
-        print(_flame_row(level, width))
-        next_level = []
-        for x, w, _label, node, _total in level:
-            children = sorted(node['children'].items(),
-                              key=lambda kv: -kv[1]['total'])
-            cx = x
-            rem = w
-            for cname, cnode in children:
-                cw = max(1, round(w * cnode['total'] / node['total']))
-                cw = min(cw, rem)
-                if cw > 0:
-                    next_level.append((cx, cw, cname, cnode, total))
-                    cx += cw
-                    rem -= cw
-                if rem <= 0:
-                    break
-        level = next_level
+    max_depth = max(1, term_w // _IC_COL_W)
+
+    # ── 1. Collect layout ────────────────────────────────────────────────
+    # items: list of (depth, y0, cell_h, label, node_total, bg_color)
+    items = []
+
+    def _collect(node, depth, y_lo, y_hi, label, bg):
+        if depth >= max_depth or (y_hi - y_lo) * term_h < 0.5:
+            return
+        y0     = round(y_lo * term_h)
+        cell_h = max(1, round(y_hi * term_h) - y0)
+        items.append((depth, y0, cell_h, label, node['total'], bg))
+        children = sorted(node['children'].items(),
+                          key=lambda kv: -kv[1]['total'])
+        span = y_hi - y_lo
+        cum  = y_lo
+        for i, (cname, cnode) in enumerate(children):
+            cf = span * cnode['total'] / node['total']
+            child_bg = _IC_PALETTE[i % len(_IC_PALETTE)] if depth == 0 else bg
+            _collect(cnode, depth + 1, cum, cum + cf, cname, child_bg)
+            cum += cf
+
+    _collect(root, 0, 0.0, 1.0, 'all', _IC_ROOT_BG)
+
+    # ── 2. Build character grid ──────────────────────────────────────────
+    bg_grid = [[_IC_EMPTY_BG] * term_w for _ in range(term_h)]
+    ch_grid = [[' ']           * term_w for _ in range(term_h)]
+
+    for depth, y0, cell_h, label, node_total, bg in items:
+        x0 = depth * _IC_COL_W
+        x1 = min(x0 + _IC_CELL_W, term_w)
+        if x0 >= term_w:
+            continue
+        for row in range(y0, min(y0 + cell_h, term_h)):
+            for col in range(x0, x1):
+                bg_grid[row][col] = bg
+        pct  = int(node_total * 100 / total)
+        text = f' {label} {pct}%'
+        for i, c in enumerate(text[:_IC_CELL_W]):
+            if y0 < term_h:
+                ch_grid[y0][x0 + i] = c
+
+    # Separator columns between depth levels
+    for d in range(1, max_depth + 1):
+        sep = d * _IC_COL_W - 1
+        if sep >= term_w:
+            break
+        for row in range(term_h):
+            bg_grid[row][sep] = _IC_SEP_BG
+            ch_grid[row][sep] = ' '
+
+    # ── 3. Render ────────────────────────────────────────────────────────
+    _FG = f'\033[38;5;{_IC_FG}m'
+    for row in range(term_h):
+        parts   = []
+        prev_bg = -1
+        for col in range(term_w):
+            bg = bg_grid[row][col]
+            if bg != prev_bg:
+                parts.append(f'\033[48;5;{bg}m{_FG}')
+                prev_bg = bg
+            parts.append(ch_grid[row][col])
+        parts.append(RESET)
+        sys.stdout.write(''.join(parts) + '\n')
 
 
 def render_map(obj):
