@@ -1435,6 +1435,40 @@ builtin_arg(struct dt_evt *dtev, enum bt_argtype dat)
 }
 
 /*
+ * Follow typedefs/qualifiers to the concrete type and return non-zero if it
+ * is a signed integer (CTF_K_INTEGER with CTF_INT_SIGNED set).
+ */
+static int
+ctf_typeid_is_signed(uint16_t typeid)
+{
+	uint16_t ctid = typeid;
+	int depth;
+
+	if (ctf_handle == NULL || ctid == 0)
+		return 0;
+	for (depth = 0; depth < 16; depth++) {
+		uint16_t kind = ctf_type_kind(ctf_handle, ctid);
+		switch (kind) {
+		case CTF_K_TYPEDEF:
+		case CTF_K_VOLATILE:
+		case CTF_K_CONST:
+		case CTF_K_RESTRICT:
+			ctid = ctf_type_reference(ctf_handle, ctid);
+			if (ctid == 0)
+				return 0;
+			continue;
+		case CTF_K_INTEGER: {
+			uint32_t enc = ctf_type_encoding(ctf_handle, ctid);
+			return (CTF_INT_ENCODING(enc) & CTF_INT_SIGNED) != 0;
+		}
+		default:
+			return 0;
+		}
+	}
+	return 0;
+}
+
+/*
  * CTF member iterator callback for ctf_resolve_deref().
  * Stops at the first member whose name matches info->field.
  */
@@ -1755,6 +1789,7 @@ fill_deref_node(struct bt_deref *bd, struct dtioc_probe_info *dtpi,
 	dtrq->dtrq_evtflags |= DTEVT_MEMARGS;
 	bd->bd_offset = offset;
 	bd->bd_size = size;
+	bd->bd_signed = ctf_typeid_is_signed(bd->bd_typeid);
 	bd->bd_slot = slot;
 	return slot;
 }
@@ -1924,6 +1959,31 @@ ba_fill_deref(struct bt_arg *ba, struct dtioc_probe_info *dtpi,
 		case B_AT_FN_SUBSCRIPT:
 			fill_subscript_node(ba->ba_value, dtpi, dtrq);
 			break;
+		case B_AT_BI_RETVAL: {
+			/*
+			 * Resolve the function return type via CTF so that
+			 * ba2long can apply the correct sign/zero extension
+			 * for sub-word return types (e.g. int on arm64).
+			 * Pack (size, is_signed) into ba_value as a uintptr_t:
+			 *   bits 7:0  = size in bytes
+			 *   bit  8    = 1 if signed integer type
+			 * A zero ba_value means type info is unavailable.
+			 */
+			uint16_t ret_type;
+			ssize_t sz;
+
+			if (ctf_handle != NULL && ba->ba_value == NULL &&
+			    ctf_func_info(ctf_handle, dtpi->dtpi_func,
+			    &ret_type, NULL, 0) >= 0) {
+				sz = ctf_type_size(ctf_handle, ret_type);
+				if (sz > 0 && sz < (ssize_t)sizeof(uint64_t))
+					ba->ba_value = (void *)(uintptr_t)
+					    ((uint8_t)sz |
+					    (ctf_typeid_is_signed(ret_type)
+					    ? 0x100 : 0));
+			}
+			break;
+		}
 		case B_AT_MAP:
 			if (ba->ba_key != NULL)
 				ba_fill_deref(ba->ba_key, dtpi, dtrq);
@@ -3247,9 +3307,33 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 		val = dtev->dtev_args[ba->ba_type - B_AT_BI_ARG0];
 		break;
-	case B_AT_BI_RETVAL:
-		val = dtev->dtev_retval[0];
+	case B_AT_BI_RETVAL: {
+		uint64_t raw = dtev->dtev_retval[0];
+		uintptr_t info = (uintptr_t)ba->ba_value;
+
+		if (info != 0) {
+			uint8_t sz = info & 0xFF;
+			int is_signed = (info >> 8) & 1;
+
+			if (is_signed) {
+				switch (sz) {
+				case 1: val = (long)(int8_t)raw;  break;
+				case 2: val = (long)(int16_t)raw; break;
+				case 4: val = (long)(int32_t)raw; break;
+				default: val = (long)raw;          break;
+				}
+			} else {
+				switch (sz) {
+				case 1: val = (long)(uint8_t)raw;  break;
+				case 2: val = (long)(uint16_t)raw; break;
+				case 4: val = (long)(uint32_t)raw; break;
+				default: val = (long)raw;           break;
+				}
+			}
+		} else
+			val = (long)raw;
 		break;
+	}
 	case B_AT_BI_PROBE:
 		val = dtev->dtev_pbn;
 		break;
@@ -3295,8 +3379,28 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	}
 	case B_AT_FN_DEREF: {
 		struct bt_deref *bd = ba->ba_value;
-		val = (bd->bd_slot != BD_SLOT_UNSET)
-		    ? (long)dtev->dtev_mem[bd->bd_slot] : 0;
+		uint64_t raw;
+
+		if (bd->bd_slot == BD_SLOT_UNSET) {
+			val = 0;
+			break;
+		}
+		raw = dtev->dtev_mem[bd->bd_slot];
+		if (bd->bd_signed) {
+			switch (bd->bd_size) {
+			case 1: val = (long)(int8_t)raw;  break;
+			case 2: val = (long)(int16_t)raw; break;
+			case 4: val = (long)(int32_t)raw; break;
+			default: val = (long)raw;          break;
+			}
+		} else {
+			switch (bd->bd_size) {
+			case 1: val = (long)(uint8_t)raw;  break;
+			case 2: val = (long)(uint16_t)raw; break;
+			case 4: val = (long)(uint32_t)raw; break;
+			default: val = (long)raw;           break;
+			}
+		}
 		break;
 	}
 	case B_AT_FN_SUBSCRIPT: {
