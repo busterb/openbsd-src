@@ -26,7 +26,8 @@
  * maphist  (@map[k] = hist(v)):    2-D heatmap — rows=outer keys, cols=buckets
  * hist     (@h = hist(v)):         horizontal bar chart
  * map      (@map[k] = count()):    bar chart sorted by value
- * stackmap (@map[kstack] = count()): icicle chart (flame graph), width adapts
+ * stackmap (@map[kstack] = count()): vertical icicle chart — columns=depth,
+ *                                    cell height ∝ count, 256-color branches
  *
  * Column width is fixed at TUI_COL_W display columns.  Unicode block chars
  * are exactly 1 display column wide; we emit them with explicit surrounding
@@ -421,12 +422,6 @@ struct flame_node {
 	size_t			 fn_childcap;
 };
 
-/* One rendered box at a given tree level. */
-struct flame_box {
-	int			 fb_x;
-	int			 fb_w;
-	struct flame_node	*fb_node;
-};
 
 static struct flame_node *
 flame_node_new(const char *name, size_t namelen)
@@ -531,112 +526,176 @@ flame_node_cmp(const void *a, const void *b)
 }
 
 /*
- * Render the icicle chart level-by-level into fp.
- * Each box: '|' + label (truncated) + percentage, proportional width.
+ * Vertical icicle chart: each column is a call-stack depth level.
+ * Cell height is proportional to sample count.  The largest child at
+ * each split inherits the parent's color; other siblings get a new
+ * color from ic_name_color().  All cells use bright-white foreground.
+ */
+static const int ic_palette[] = {
+	22, 18, 52, 58, 23, 53, 88, 130,
+	28, 24, 54, 94, 30, 19, 89, 100,
+};
+#define IC_NPALETTE	(sizeof(ic_palette) / sizeof(ic_palette[0]))
+#define IC_EMPTY_BG	234	/* near-black for unused cells */
+#define IC_SEP_BG	232	/* darkest gray for column separators */
+#define IC_FG		231	/* bright white text */
+#define IC_COL_W	20	/* total column width (cell + 1-char separator) */
+#define IC_CELL_W	(IC_COL_W - 1)
+
+/* Stable per-name color via djb2 hash → palette index. */
+static int
+ic_name_color(const char *name)
+{
+	unsigned long	h = 5381;
+	unsigned char	c;
+
+	while ((c = (unsigned char)*name++) != '\0')
+		h = h * 33 ^ c;
+	return ic_palette[h % IC_NPALETTE];
+}
+
+/*
+ * Recursively fill the grid for `node' starting at column `depth'.
+ * y_lo/y_hi are fractional row positions in [0.0, 1.0).
  */
 static void
-tui_flame_render(FILE *fp, struct flame_node *root, int width)
+ic_collect(struct flame_node *node, int depth, double y_lo, double y_hi,
+    int bg, int height, int width, int max_cols,
+    int *bg_grid, char *ch_grid, long total)
 {
-	struct flame_box	*cur = NULL, *nxt = NULL;
-	size_t			 ncur, nnxt, nxtcap;
-	char			*row;
-	long			 total = root->fn_total;
-	size_t			 i;
+	char	text[IC_CELL_W + 1];
+	double	span, cum, cf;
+	long	pct;
+	int	y0, y1, cell_h, x0, x1, row, col, textlen, i;
+	size_t	j;
 
-	if (total == 0 || width < 2)
+	if (depth >= max_cols || (y_hi - y_lo) * height < 0.5)
 		return;
 
-	row = malloc(width + 1);
-	if (row == NULL)
-		err(1, NULL);
+	y0     = (int)(y_lo * height);
+	y1     = (int)(y_hi * height);
+	cell_h = (y1 > y0) ? y1 - y0 : 1;
 
-	cur = calloc(1, sizeof(*cur));
-	if (cur == NULL)
-		err(1, NULL);
-	cur[0].fb_x    = 0;
-	cur[0].fb_w    = width;
-	cur[0].fb_node = root;
-	ncur   = 1;
-	nnxt   = 0;
-	nxtcap = 0;
+	x0 = depth * IC_COL_W;
+	x1 = x0 + IC_CELL_W;
+	if (x0 >= width)
+		return;
+	if (x1 > width)
+		x1 = width;
 
-	while (ncur > 0) {
-		/* Render this level. */
-		memset(row, ' ', width);
-		row[width] = '\0';
-		for (i = 0; i < ncur; i++) {
-			int x = cur[i].fb_x, w = cur[i].fb_w;
-			struct flame_node *fn = cur[i].fb_node;
-			int inner, pct, l;
-			char label[128];
+	for (row = y0; row < y0 + cell_h && row < height; row++)
+		for (col = x0; col < x1; col++)
+			bg_grid[row * width + col] = bg;
 
-			if (x >= width || w < 1)
-				continue;
-			row[x] = '|';
-			if (w < 3)
-				continue;
-			inner = (x + w > width) ? width - x - 1 : w - 1;
-			pct   = (int)(fn->fn_total * 100 / total);
-			l = snprintf(label, sizeof(label), "%s %d%%",
-			    fn->fn_name, pct);
-			if (l < 0 || l > inner)
-				l = snprintf(label, sizeof(label), "%s",
-				    fn->fn_name);
-			if (l < 0)
-				l = 0;
-			if (l > inner)
-				l = inner;
-			memcpy(row + x + 1, label, l);
-		}
-		fprintf(fp, "%s\n", row);
+	pct     = node->fn_total * 100 / total;
+	textlen = snprintf(text, sizeof(text), "%3ld%% %s", pct,
+	    node->fn_name);
+	if (textlen < 0)
+		textlen = 0;
+	if (textlen > IC_CELL_W)
+		textlen = IC_CELL_W;
+	if (y0 < height)
+		for (i = 0; i < textlen && x0 + i < x1; i++)
+			ch_grid[y0 * width + x0 + i] = text[i];
 
-		/* Build next level. */
-		nnxt = 0;
-		for (i = 0; i < ncur; i++) {
-			int x = cur[i].fb_x, w = cur[i].fb_w;
-			struct flame_node *fn = cur[i].fb_node;
-			int cx = x, rem = w;
-			size_t j;
+	if (node->fn_nchildren == 0)
+		return;
+	qsort(node->fn_children, node->fn_nchildren,
+	    sizeof(*node->fn_children), flame_node_cmp);
 
-			if (fn->fn_nchildren == 0)
-				continue;
-			qsort(fn->fn_children, fn->fn_nchildren,
-			    sizeof(*fn->fn_children), flame_node_cmp);
-			for (j = 0; j < fn->fn_nchildren && rem > 0; j++) {
-				struct flame_node *child = fn->fn_children[j];
-				struct flame_box  *tmp;
-				int cw = (int)((long)w * child->fn_total /
-				    fn->fn_total);
-				if (cw < 1)
-					cw = 1;
-				if (cw > rem)
-					cw = rem;
-				if (nnxt >= nxtcap) {
-					nxtcap = nxtcap ? nxtcap * 2 : 8;
-					tmp = reallocarray(nxt, nxtcap,
-					    sizeof(*tmp));
-					if (tmp == NULL)
-						err(1, NULL);
-					nxt = tmp;
-				}
-				nxt[nnxt].fb_x    = cx;
-				nxt[nnxt].fb_w    = cw;
-				nxt[nnxt].fb_node = child;
-				nnxt++;
-				cx  += cw;
-				rem -= cw;
-			}
-		}
-
-		free(cur);
-		cur    = nxt;
-		ncur   = nnxt;
-		nxt    = NULL;
-		nnxt   = 0;
-		nxtcap = 0;
+	span = y_hi - y_lo;
+	cum  = y_lo;
+	for (j = 0; j < node->fn_nchildren; j++) {
+		struct flame_node *child = node->fn_children[j];
+		cf = span * (double)child->fn_total / node->fn_total;
+		ic_collect(child, depth + 1, cum, cum + cf,
+		    j == 0 ? bg : ic_name_color(child->fn_name),
+		    height, width, max_cols, bg_grid, ch_grid, total);
+		cum += cf;
 	}
-	free(row);
-	/* cur == NULL here (was swapped from nxt which was reset) */
+}
+
+/*
+ * Render the vertical icicle chart into fp.
+ * Columns = call-stack depth levels; cell height ∝ sample count.
+ * Skips the boring single-child prefix (e.g. all→kernel→...) so the
+ * first visible column is the first level with multiple branches.
+ */
+static void
+tui_flame_render(FILE *fp, struct flame_node *root, int width, int height)
+{
+	struct flame_node	*display_root;
+	int			*bg_grid = NULL;
+	char			*ch_grid = NULL;
+	int			 max_cols, row, col, d, sep;
+	double			 cum, cf;
+	size_t			 i, gridsize;
+
+	if (root->fn_total == 0 || width < IC_COL_W || height < 1)
+		return;
+
+	/* Skip boring single-child prefix (always 100%, no information). */
+	display_root = root;
+	while (display_root->fn_nchildren == 1)
+		display_root = display_root->fn_children[0];
+	if (display_root->fn_nchildren == 0)
+		return;
+
+	max_cols = width / IC_COL_W;
+	if (max_cols < 1)
+		max_cols = 1;
+
+	gridsize = (size_t)height * width;
+	bg_grid  = calloc(gridsize, sizeof(*bg_grid));
+	ch_grid  = calloc(gridsize, sizeof(*ch_grid));
+	if (bg_grid == NULL || ch_grid == NULL)
+		goto out;
+
+	for (i = 0; i < gridsize; i++) {
+		bg_grid[i] = IC_EMPTY_BG;
+		ch_grid[i] = ' ';
+	}
+
+	/* Separator columns. */
+	for (d = 1; d <= max_cols; d++) {
+		sep = d * IC_COL_W - 1;
+		if (sep >= width)
+			break;
+		for (row = 0; row < height; row++)
+			bg_grid[row * width + sep] = IC_SEP_BG;
+	}
+
+	/* Seed top-level branches; each gets its own stable color. */
+	qsort(display_root->fn_children, display_root->fn_nchildren,
+	    sizeof(*display_root->fn_children), flame_node_cmp);
+	cum = 0.0;
+	for (i = 0; i < display_root->fn_nchildren; i++) {
+		struct flame_node *child = display_root->fn_children[i];
+		cf = (double)child->fn_total / display_root->fn_total;
+		ic_collect(child, 0, cum, cum + cf,
+		    ic_name_color(child->fn_name),
+		    height, width, max_cols, bg_grid, ch_grid,
+		    root->fn_total);
+		cum += cf;
+	}
+
+	/* Emit grid with ANSI 256-color backgrounds. */
+	for (row = 0; row < height; row++) {
+		int prev_bg = -1;
+		for (col = 0; col < width; col++) {
+			int bg = bg_grid[row * width + col];
+			if (bg != prev_bg) {
+				fprintf(fp, "\033[48;5;%dm\033[38;5;%dm",
+				    bg, IC_FG);
+				prev_bg = bg;
+			}
+			fputc((unsigned char)ch_grid[row * width + col], fp);
+		}
+		fputs(TUI_RESET "\n", fp);
+	}
+out:
+	free(bg_grid);
+	free(ch_grid);
 }
 
 static void
@@ -648,7 +707,7 @@ tui_flame_print(struct map *map, const char *name)
 	char *buf;
 	size_t bufsz;
 	FILE *fp;
-	int width = 80;
+	int width = 80, height = 24;
 
 	fp = open_memstream(&buf, &bufsz);
 	if (fp == NULL)
@@ -658,11 +717,15 @@ tui_flame_print(struct map *map, const char *name)
 	RB_FOREACH(mep, map, map)
 		flame_insert(root, mep->mkey, ba2long(mep->mval, NULL));
 
-	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 1)
-		width = (int)ws.ws_col - 1;
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
+		if (ws.ws_col > 0)
+			width = (int)ws.ws_col;
+		if (ws.ws_row > 4)
+			height = (int)ws.ws_row - 4;
+	}
 
 	fprintf(fp, TUI_BOLD "@%s" TUI_RESET "\n", name);
-	tui_flame_render(fp, root, width);
+	tui_flame_render(fp, root, width, height);
 	fclose(fp);
 
 	flame_node_free(root);
