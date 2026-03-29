@@ -77,6 +77,7 @@ static const char *tui_cells[] = {
 struct tui_section {
 	char			*ts_name;
 	char			*ts_buf;
+	int			 ts_is_flame;	/* 1 if this is a stack/flame map */
 	struct tui_section	*ts_next;
 };
 static struct tui_section *tui_head;
@@ -701,13 +702,27 @@ out:
 static void
 tui_flame_print(struct map *map, const char *name)
 {
-	struct flame_node *root;
-	struct mentry *mep;
-	struct winsize ws;
-	char *buf;
-	size_t bufsz;
-	FILE *fp;
-	int width = 80, height = 24;
+	struct tui_section	*ts;
+	struct flame_node	*root;
+	struct mentry		*mep;
+	struct winsize		 ws;
+	char			*buf;
+	size_t			 bufsz;
+	FILE			*fp;
+	int			 width = 80, height = 24;
+
+	/* Remember that this section is a flame/stack map. */
+	ts = tui_section_get(name);
+	ts->ts_is_flame = 1;
+
+	/*
+	 * If the map is empty (cleared between intervals), preserve the
+	 * previous render rather than replacing it with a blank chart.
+	 */
+	if (RB_EMPTY(map)) {
+		tui_redraw();
+		return;
+	}
 
 	fp = open_memstream(&buf, &bufsz);
 	if (fp == NULL)
@@ -736,16 +751,19 @@ tui_flame_print(struct map *map, const char *name)
 void
 tui_map_print(struct map *map, size_t top, const char *name)
 {
-	struct mentry **elms, *mep;
-	size_t i, count = 0;
-	char *buf;
-	size_t bufsz;
-	FILE *fp;
-	long max = 0;
-	int bar_w = 48;
+	struct tui_section	*ts;
+	struct mentry		**elms, *mep;
+	size_t			 i, count = 0;
+	char			*buf;
+	size_t			 bufsz;
+	FILE			*fp;
+	long			 max = 0;
+	int			 bar_w = 48;
 
 	if (map == NULL)
 		return;
+
+	ts = tui_section_get(name);
 
 	/* kstack/ustack keys contain '\n'-separated frames. */
 	RB_FOREACH(mep, map, map) {
@@ -755,6 +773,20 @@ tui_map_print(struct map *map, size_t top, const char *name)
 		}
 		break;
 	}
+
+	/*
+	 * If this section was previously rendered as a flame chart and the
+	 * map is now empty (cleared between intervals), route through
+	 * tui_flame_print which will preserve the last render.
+	 */
+	if (ts->ts_is_flame) {
+		tui_flame_print(map, name);
+		return;
+	}
+
+	/* For regular maps, skip the update when there's nothing to show. */
+	if (RB_EMPTY(map))
+		return;
 
 	fp = open_memstream(&buf, &bufsz);
 	if (fp == NULL)
