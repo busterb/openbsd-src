@@ -23,6 +23,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/proc.h>
+#include <sys/sched.h>
 #include <sys/malloc.h>
 #include <sys/device.h>
 #include <sys/sysctl.h>
@@ -562,8 +563,8 @@ cpu_identify(struct cpu_info *ci)
 	ci->ci_midr = midr;
 
 	/*
-	 * Tag known efficiency-class cores so the scheduler can
-	 * deprioritise them for normal (non-niced) processes.
+	 * Assign a scheduling class to known efficiency cores so the
+	 * scheduler reserves them for background (niced) work.
 	 */
 	switch (impl) {
 	case CPU_IMPL_ARM:
@@ -576,18 +577,24 @@ cpu_identify(struct cpu_info *ci)
 		case CPU_PART_CORTEX_A520:
 		case CPU_PART_CORTEX_A520AE:
 		case CPU_PART_CORTEX_A320:
-			ci->ci_efficiency = 1;
+			ci->ci_sched_class = CPU_CLASS_SLOW;
 			break;
 		}
 		break;
 	case CPU_IMPL_QCOM:
 		switch (part) {
 		case CPU_PART_KRYO400_SILVER:
-			ci->ci_efficiency = 1;
+			ci->ci_sched_class = CPU_CLASS_SLOW;
 			break;
 		}
 		break;
 	case CPU_IMPL_APPLE:
+		/*
+		 * Apple efficiency cores (Icestorm, Blizzard) are still pretty
+		 * fast and acceptable for normal work;
+		 * classify them as normal rather than slow so they are used
+		 * when the performance cores are busy.
+		 */
 		switch (part) {
 		case CPU_PART_ICESTORM:
 		case CPU_PART_ICESTORM_PRO:
@@ -595,7 +602,7 @@ cpu_identify(struct cpu_info *ci)
 		case CPU_PART_BLIZZARD:
 		case CPU_PART_BLIZZARD_PRO:
 		case CPU_PART_BLIZZARD_MAX:
-			ci->ci_efficiency = 1;
+			ci->ci_sched_class = CPU_CLASS_NORMAL;
 			break;
 		}
 		break;
@@ -1250,7 +1257,7 @@ cpu_identify(struct cpu_info *ci)
 
 		if (ID_AA64ZFR0_BITPERM(id) >= ID_AA64ZFR0_BITPERM_IMPL)
 			printf(",BitPerm");
-		
+
 		if (ID_AA64ZFR0_AES(id) >= ID_AA64ZFR0_AES_BASE)
 			printf(",AES");
 		if (ID_AA64ZFR0_AES(id) >= ID_AA64ZFR0_AES_PMULL)
@@ -2489,7 +2496,7 @@ cpu_opp_get_cooling_level(void *cookie, uint32_t *cells)
 {
 	struct cpu_info *ci = cookie;
 	struct opp_table *ot = ci->ci_opp_table;
-	
+
 	return ot->ot_nopp - ci->ci_opp_max - 1;
 }
 
@@ -2607,7 +2614,7 @@ cpu_psci_init(struct cpu_info *ci)
 	 * We found the "psci" power domain.  If this power domain has
 	 * a parent power domain, stash its phandle away for later.
 	 */
- 
+
 	cluster = OF_getpropint(node, "power-domains", 0);
 
 	/*

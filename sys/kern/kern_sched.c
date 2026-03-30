@@ -32,8 +32,10 @@
 
 void sched_kthreads_create(void *);
 
+#ifdef MULTIPROCESSOR
 int sched_proc_to_cpu_cost(struct cpu_info *ci, struct proc *p);
 struct proc *sched_steal_proc(struct cpu_info *);
+#endif
 
 /*
  * To help choosing which cpu should run which process we keep track
@@ -376,8 +378,8 @@ struct cpu_info *
 sched_choosecpu_fork(struct proc *parent, int flags)
 {
 #ifdef MULTIPROCESSOR
-	struct cpu_info *choice = NULL;
-	int run, best_run = INT_MAX;
+	struct cpu_info *choice = NULL, *choice_slow = NULL;
+	int run, best_run = INT_MAX, best_run_slow = INT_MAX;
 	struct cpu_info *ci;
 	struct cpuset set;
 
@@ -412,11 +414,50 @@ sched_choosecpu_fork(struct proc *parent, int flags)
 
 		run = ci->ci_schedstate.spc_nrun;
 
+#ifdef __HAVE_CPU_TOPOLOGY
+		if (ci->ci_sched_class == CPU_CLASS_SLOW) {
+			if (choice_slow == NULL || run < best_run_slow) {
+				choice_slow = ci;
+				best_run_slow = run;
+			}
+			continue;
+		}
+#endif
 		if (choice == NULL || run < best_run) {
 			choice = ci;
 			best_run = run;
 		}
 	}
+
+#ifdef __HAVE_CPU_TOPOLOGY
+	/*
+	 * For background (niced) work prefer slow CPUs, freeing fast and
+	 * normal cores for higher-priority processes.
+	 *
+	 * For normal work: if the idle set contained only slow CPUs, do a
+	 * second pass over all CPUs restricted to non-slow ones.  A busy
+	 * fast core is preferable to an idle slow one.  Only fall back to
+	 * a slow CPU when no fast or normal CPU exists at all.
+	 */
+	if (parent->p_p->ps_nice > NZERO) {
+		if (choice_slow != NULL)
+			choice = choice_slow;
+	} else if (choice == NULL) {
+		cpuset_copy(&set, &sched_all_cpus);
+		while ((ci = cpuset_first(&set)) != NULL) {
+			cpuset_del(&set, ci);
+			if (ci->ci_sched_class == CPU_CLASS_SLOW)
+				continue;
+			run = ci->ci_schedstate.spc_nrun;
+			if (choice == NULL || run < best_run) {
+				choice = ci;
+				best_run = run;
+			}
+		}
+		if (choice == NULL)
+			choice = choice_slow;
+	}
+#endif
 
 	if (choice != NULL)
 		return (choice);
@@ -428,8 +469,8 @@ struct cpu_info *
 sched_choosecpu(struct proc *p)
 {
 #ifdef MULTIPROCESSOR
-	struct cpu_info *choice = NULL;
-	int last_cost = INT_MAX;
+	struct cpu_info *choice = NULL, *choice_slow = NULL;
+	int last_cost = INT_MAX, last_cost_slow = INT_MAX;
 	struct cpu_info *ci;
 	struct cpuset set;
 
@@ -455,11 +496,18 @@ sched_choosecpu(struct proc *p)
 	 * this is simple.
 	 * Also, our cpu might not be idle, but if it's the current cpu
 	 * and it has nothing else queued and we're curproc, take it.
+	 * Skip this fast path for non-niced processes on slow CPUs: a
+	 * fast or normal core should be preferred even if it is busier.
 	 */
-	if (cpuset_isset(&set, p->p_cpu) ||
+	if ((cpuset_isset(&set, p->p_cpu) ||
 	    (p->p_cpu == curcpu() && p->p_cpu->ci_schedstate.spc_nrun == 0 &&
 	    (p->p_cpu->ci_schedstate.spc_schedflags & SPCF_SHOULDHALT) == 0 &&
-	    curproc == p)) {
+	    curproc == p))
+#ifdef __HAVE_CPU_TOPOLOGY
+	    && (p->p_p->ps_nice > NZERO ||
+	    p->p_cpu->ci_sched_class != CPU_CLASS_SLOW)
+#endif
+	    ) {
 		sched_wasidle++;
 		return (p->p_cpu);
 	}
@@ -470,12 +518,51 @@ sched_choosecpu(struct proc *p)
 	while ((ci = cpuset_first(&set)) != NULL) {
 		int cost = sched_proc_to_cpu_cost(ci, p);
 
+		cpuset_del(&set, ci);
+#ifdef __HAVE_CPU_TOPOLOGY
+		if (ci->ci_sched_class == CPU_CLASS_SLOW) {
+			if (choice_slow == NULL || cost < last_cost_slow) {
+				choice_slow = ci;
+				last_cost_slow = cost;
+			}
+			continue;
+		}
+#endif
 		if (choice == NULL || cost < last_cost) {
 			choice = ci;
 			last_cost = cost;
 		}
-		cpuset_del(&set, ci);
 	}
+
+#ifdef __HAVE_CPU_TOPOLOGY
+	/*
+	 * For background (niced) work prefer slow CPUs, freeing fast and
+	 * normal cores for higher-priority processes.
+	 *
+	 * For normal work: if the idle set contained only slow CPUs, do a
+	 * second pass over all CPUs restricted to non-slow ones.  A busy
+	 * fast core is preferable to an idle slow one.  Only fall back to
+	 * a slow CPU when no fast or normal CPU exists at all.
+	 */
+	if (p->p_p->ps_nice > NZERO) {
+		if (choice_slow != NULL)
+			choice = choice_slow;
+	} else if (choice == NULL) {
+		cpuset_copy(&set, &sched_all_cpus);
+		while ((ci = cpuset_first(&set)) != NULL) {
+			int cost = sched_proc_to_cpu_cost(ci, p);
+			cpuset_del(&set, ci);
+			if (ci->ci_sched_class == CPU_CLASS_SLOW)
+				continue;
+			if (choice == NULL || cost < last_cost) {
+				choice = ci;
+				last_cost = cost;
+			}
+		}
+		if (choice == NULL)
+			choice = choice_slow;
+	}
+#endif
 
 	if (p->p_cpu != choice)
 		sched_nmigrations++;
@@ -522,7 +609,15 @@ sched_steal_proc(struct cpu_info *self)
 		TAILQ_FOREACH(p, &spc->spc_qs[queue], p_runq) {
 			if (p->p_flag & P_CPUPEG)
 				continue;
-
+#ifdef __HAVE_CPU_TOPOLOGY
+			/*
+			 * Don't steal normal work onto a slow CPU; let it
+			 * remain available for a fast or normal core.
+			 */
+			if (self->ci_sched_class == CPU_CLASS_SLOW &&
+			    p->p_p->ps_nice <= NZERO)
+				continue;
+#endif
 			cost = sched_proc_to_cpu_cost(self, p);
 
 			if (best == NULL || cost < bestcost) {
@@ -574,14 +669,20 @@ log2(unsigned int i)
 int sched_cost_priority = 1;
 int sched_cost_runnable = 3;
 int sched_cost_resident = 1;
-int sched_cost_efficiency = 8;
+#ifdef __HAVE_CPU_TOPOLOGY
+/*
+ * Per-class cost added when evaluating a CPU for non-background work.
+ * CPU_CLASS_FAST=0 bears no extra cost; CPU_CLASS_NORMAL gets a slight
+ * penalty to prefer fast cores as tiebreakers; CPU_CLASS_SLOW is kept
+ * high for the fallback path when no fast/normal CPU is available.
+ */
+static const int sched_class_cost[3] = { 0, 2, 8 };
 #endif
 
 int
 sched_proc_to_cpu_cost(struct cpu_info *ci, struct proc *p)
 {
 	int cost = 0;
-#ifdef MULTIPROCESSOR
 	struct schedstate_percpu *spc;
 	int l2resident = 0;
 
@@ -621,15 +722,17 @@ sched_proc_to_cpu_cost(struct cpu_info *ci, struct proc *p)
 
 #ifdef __HAVE_CPU_TOPOLOGY
 	/*
-	 * Prefer performance cores for normal processes; efficiency cores
-	 * are acceptable for background (niced) work.
+	 * Add a class-based cost for non-background tasks, providing a
+	 * tiebreaker that favours fast cores over normal ones.  Slow CPUs
+	 * are excluded from the candidate set before this function is
+	 * called for normal work; the cost here covers the fallback case.
 	 */
-	if (ci->ci_efficiency && p->p_p->ps_nice <= NZERO)
-		cost += sched_cost_efficiency;
-#endif
+	if (p->p_p->ps_nice <= NZERO)
+		cost += sched_class_cost[ci->ci_sched_class];
 #endif
 	return (cost);
 }
+#endif /* MULTIPROCESSOR */
 
 /*
  * Peg a proc to a cpu.

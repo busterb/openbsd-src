@@ -193,6 +193,10 @@ void sched_start_secondary_cpus(void);
 void sched_stop_secondary_cpus(void);
 #endif
 
+#define CPU_CLASS_FAST		0	/* best cores; preferred for all work */
+#define CPU_CLASS_NORMAL	1	/* capable; acceptable for all work */
+#define CPU_CLASS_SLOW		2	/* efficiency cores; background work only */
+
 #define cpu_is_idle(ci)	((ci)->ci_schedstate.spc_whichqs == 0)
 int	cpu_is_online(struct cpu_info *);
 
