@@ -1036,7 +1036,9 @@ sr_meta_native_bootprobe(struct sr_softc *sc, dev_t devno,
 	}
 
 	/* open device */
+	printf("sr: bootprobe open rawdev=0x%x\n", rawdev);
 	error = VOP_OPEN(vn, FREAD, NOCRED, curproc);
+	printf("sr: bootprobe open done error=%d\n", error);
 	if (error) {
 		DNPRINTF(SR_D_META, "%s: sr_meta_native_bootprobe open "
 		    "failed\n", DEVNAME(sc));
@@ -1047,8 +1049,10 @@ sr_meta_native_bootprobe(struct sr_softc *sc, dev_t devno,
 	label = malloc(sizeof(*label), M_DEVBUF, M_WAITOK);
 
 	/* get disklabel */
+	printf("sr: bootprobe ioctl\n");
 	error = VOP_IOCTL(vn, DIOCGDINFO, (caddr_t)label, FREAD, NOCRED,
 	    curproc);
+	printf("sr: bootprobe ioctl done error=%d\n", error);
 	if (error) {
 		DNPRINTF(SR_D_META, "%s: sr_meta_native_bootprobe ioctl "
 		    "failed\n", DEVNAME(sc));
@@ -1837,18 +1841,27 @@ sr_attach(struct device *parent, struct device *self, void *aux)
 	{
 		struct disk *dk;
 		int slept = 0;
+		TAILQ_FOREACH(dk, &disklist, dk_link)
+			printf("sr: dk %s devno=0x%x flags=0x%x\n",
+			    dk->dk_name, dk->dk_devno, dk->dk_flags);
 		do {
 			TAILQ_FOREACH(dk, &disklist, dk_link) {
 				if (dk->dk_devno != NODEV &&
 				    (dk->dk_flags & DKF_OPENED) == 0) {
+					printf("sr: waiting for %s flags=0x%x"
+					    " slept=%d\n", dk->dk_name,
+					    dk->dk_flags, slept);
 					tsleep_nsec(dk, PRIBIO, "srdkopen",
 					    SEC_TO_NSEC(1));
 					slept++;
+					printf("sr: woke slept=%d\n", slept);
 					break;
 				}
 			}
 		} while (dk != NULL && slept < 5);
+		printf("sr: wait done slept=%d\n", slept);
 	}
+	printf("sr: calling boot_assembly\n");
 	sr_boot_assembly(sc);
 
 	explicit_bzero(sr_bootkey, sizeof(sr_bootkey));
