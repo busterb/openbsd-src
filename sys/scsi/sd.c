@@ -1175,7 +1175,12 @@ sdgetdisklabel(dev_t dev, struct sd_softc *sc, struct disklabel *lp,
 	/*
 	 * Call the generic disklabel extraction routine.
 	 */
-	return readdisklabel(DISKLABELDEV(dev), sdstrategy, lp, spoofonly);
+	printf("sd%d: sdgetdisklabel: calling readdisklabel dev=0x%x\n",
+	    DISKUNIT(dev), DISKLABELDEV(dev));
+	{ int rv = readdisklabel(DISKLABELDEV(dev), sdstrategy, lp, spoofonly);
+	printf("sd%d: sdgetdisklabel: readdisklabel done rv=%d\n",
+	    DISKUNIT(dev), rv);
+	return rv; }
 }
 
 
