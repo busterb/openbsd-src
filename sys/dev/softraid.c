@@ -1831,9 +1831,29 @@ sr_attach(struct device *parent, struct device *self, void *aux)
 
 	softraid_disk_attach = sr_disk_attach;
 
-	printf("sr: before taskq_barrier\n");
-	taskq_barrier(systq);
-	printf("sr: after taskq_barrier\n");
+	/*
+	 * Ensure that all disk attach callbacks (disk_attach_callback, queued
+	 * to systq by disk_attach) have completed before probing for softraid
+	 * volumes. Without this, sr_meta_native_bootprobe and
+	 * disk_attach_callback can race on the specfs vnode for a raw disk
+	 * device, causing a deadlock in spec_open's vnode locking.
+	 * This uses the same mechanism as setroot() in subr_disk.c.
+	 */
+	{
+		struct disk *dk;
+		int slept = 0;
+		do {
+			TAILQ_FOREACH(dk, &disklist, dk_link) {
+				if (dk->dk_devno != NODEV &&
+				    (dk->dk_flags & DKF_OPENED) == 0) {
+					tsleep_nsec(dk, PRIBIO, "srdkopen",
+					    SEC_TO_NSEC(1));
+					slept++;
+					break;
+				}
+			}
+		} while (dk != NULL && slept < 5);
+	}
 	sr_boot_assembly(sc);
 
 	explicit_bzero(sr_bootkey, sizeof(sr_bootkey));
