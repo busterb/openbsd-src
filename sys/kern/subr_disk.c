@@ -1121,7 +1121,6 @@ disk_attach_callback(void *xdat)
 	struct disklabel *dl;
 	char errbuf[100];
 
-	printf("dac: start %s flags=0x%x\n", dk->dk_name, dk->dk_flags);
 	free(dat, M_TEMP, sizeof(*dat));
 
 	if (dk->dk_flags & (DKF_OPENED | DKF_NOLABELREAD))
@@ -1129,13 +1128,11 @@ disk_attach_callback(void *xdat)
 
 	/* Read disklabel. */
 	dl = malloc(sizeof(*dl), M_DEVBUF, M_WAITOK);
-	printf("dac: readlabel %s\n", dk->dk_name);
 	if (disk_readlabel(dl, dk->dk_devno, errbuf, sizeof(errbuf)) == NULL)
 		enqueue_randomness(dl->d_checksum);
 	free(dl, M_DEVBUF, sizeof(*dl));
 
 done:
-	printf("dac: done %s\n", dk->dk_name);
 	dk->dk_flags |= DKF_OPENED;
 	device_unref(dk->dk_device);
 	wakeup(dk);
@@ -1716,14 +1713,12 @@ disk_readlabel(struct disklabel *dl, dev_t dev, char *errbuf, size_t errsize)
 	printf("dev=0x%x chrdev=0x%x rawdev=0x%x\n", dev, chrdev, rawdev);
 #endif
 
-	printf("drl: rawdev=0x%x\n", rawdev);
 	if (cdevvp(rawdev, &vn)) {
 		snprintf(errbuf, errsize,
 		    "cannot obtain vnode for 0x%x/0x%x", dev, rawdev);
 		return (errbuf);
 	}
 
-	printf("drl: VOP_OPEN rawdev=0x%x\n", rawdev);
 	error = VOP_OPEN(vn, FREAD, NOCRED, curproc);
 	if (error) {
 		snprintf(errbuf, errsize,

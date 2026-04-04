@@ -210,7 +210,6 @@ scsibusattach(struct device *parent, struct device *self, void *aux)
 	struct scsibus_softc		*sb = (struct scsibus_softc *)self;
 	struct scsibus_attach_args	*saa = aux;
 
-	printf("entering scsibusattach\n");
 	if (!cold)
 		scsi_autoconf = 0;
 
@@ -250,7 +249,6 @@ scsibusattach(struct device *parent, struct device *self, void *aux)
 #endif /* NBIO > 0 */
 
 	scsi_probe_bus(sb);
-	printf("leaving scsibusattach\n");
 }
 
 int
