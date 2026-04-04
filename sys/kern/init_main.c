@@ -447,6 +447,7 @@ main(void *framep)
 	while (config_pending)
 		tsleep_nsec(&config_pending, PWAIT, "cfpend", INFSLP);
 
+	printf("startuphooks\n");
 	dostartuphooks();
 
 #if NVSCSI > 0
@@ -457,6 +458,7 @@ main(void *framep)
 #endif
 
 	/* Configure root/swap devices */
+	printf("diskconf\n");
 	diskconf();
 
 #ifdef DDB
