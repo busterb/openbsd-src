@@ -1115,11 +1115,13 @@ sdgetdisklabel(dev_t dev, struct sd_softc *sc, struct disklabel *lp,
 	struct scsi_link		*link;
 	size_t				 len;
 
+	printf("sd%d: sdgetdisklabel: enter lp=%p\n", DISKUNIT(dev), lp);
 	if (ISSET(sc->flags, SDF_DYING))
 		return ENXIO;
 	link = sc->sc_link;
 
 	bzero(lp, sizeof(struct disklabel));
+	printf("sd%d: sdgetdisklabel: bzero done\n", DISKUNIT(dev));
 
 	lp->d_secsize = sc->params.secsize;
 	lp->d_ntracks = sc->params.heads;
@@ -1144,6 +1146,7 @@ sdgetdisklabel(dev_t dev, struct sd_softc *sc, struct disklabel *lp,
 			strncpy(lp->d_typename, "SCSI disk",
 			    sizeof(lp->d_typename));
 	}
+	printf("sd%d: sdgetdisklabel: type set\n", DISKUNIT(dev));
 
 	/*
 	 * Try to fit '<vendor> <product>' into d_packname. If that doesn't fit
@@ -1164,6 +1167,7 @@ sdgetdisklabel(dev_t dev, struct sd_softc *sc, struct disklabel *lp,
 	 * d_packname is not a null terminated string.
 	 */
 	memcpy(lp->d_packname, packname, len);
+	printf("sd%d: sdgetdisklabel: packname set\n", DISKUNIT(dev));
 
 	DL_SETDSIZE(lp, sc->params.disksize);
 	lp->d_version = 1;
@@ -1171,6 +1175,7 @@ sdgetdisklabel(dev_t dev, struct sd_softc *sc, struct disklabel *lp,
 	lp->d_magic = DISKMAGIC;
 	lp->d_magic2 = DISKMAGIC;
 	lp->d_checksum = dkcksum(lp);
+	printf("sd%d: sdgetdisklabel: checksum done\n", DISKUNIT(dev));
 
 	/*
 	 * Call the generic disklabel extraction routine.
