@@ -334,10 +334,14 @@ sdopen(dev_t dev, int flag, int fmt, struct proc *p)
 		device_unref(&sc->sc_dev);
 		return EACCES;
 	}
+	printf("sdopen: unit=%d part=%d rawopen=%d\n", unit, part, rawopen);
 	if ((error = disk_lock(&sc->sc_dk)) != 0) {
+		printf("sdopen: disk_lock failed %d\n", error);
 		device_unref(&sc->sc_dev);
 		return error;
 	}
+	printf("sdopen: disk_lock ok, openmask=0x%llx\n",
+	    (unsigned long long)sc->sc_dk.dk_openmask);
 	if (ISSET(sc->flags, SDF_DYING)) {
 		error = ENXIO;
 		goto die;
@@ -356,10 +360,12 @@ sdopen(dev_t dev, int flag, int fmt, struct proc *p)
 		}
 	} else {
 		/* Spin up non-UMASS devices ready or not. */
+		printf("sdopen: scsi_start\n");
 		if (!ISSET(link->flags, SDEV_UMASS))
 			scsi_start(link, SSS_START, (rawopen ? SCSI_SILENT :
 			    0) | SCSI_IGNORE_ILLEGAL_REQUEST |
 			    SCSI_IGNORE_MEDIA_CHANGE);
+		printf("sdopen: scsi_start done\n");
 
 		/*
 		 * Use sd_interpret_sense() for sense errors.
@@ -390,9 +396,11 @@ sdopen(dev_t dev, int flag, int fmt, struct proc *p)
 			error = ENXIO;
 			goto die;
 		}
+		printf("sdopen: test_unit_ready\n");
 		error = scsi_test_unit_ready(link,
 		    TEST_READY_RETRIES, SCSI_SILENT |
 		    SCSI_IGNORE_ILLEGAL_REQUEST | SCSI_IGNORE_MEDIA_CHANGE);
+		printf("sdopen: test_unit_ready done err=%d\n", error);
 		if (error) {
 			if (rawopen) {
 				error = 0;
@@ -407,6 +415,7 @@ sdopen(dev_t dev, int flag, int fmt, struct proc *p)
 			goto die;
 		}
 		SET(link->flags, SDEV_MEDIA_LOADED);
+		printf("sdopen: sd_get_parms\n");
 		if (sd_get_parms(sc, (rawopen ? SCSI_SILENT : 0)) == -1) {
 			if (ISSET(sc->flags, SDF_DYING)) {
 				error = ENXIO;
@@ -416,10 +425,13 @@ sdopen(dev_t dev, int flag, int fmt, struct proc *p)
 			error = ENXIO;
 			goto bad;
 		}
+		printf("sdopen: sd_get_parms done\n");
 		SC_DEBUG(link, SDEV_DB3, ("Params loaded\n"));
 
 		/* Load the partition info if not already loaded. */
+		printf("sdopen: sdgetdisklabel\n");
 		error = sdgetdisklabel(dev, sc, sc->sc_dk.dk_label, 0);
+		printf("sdopen: sdgetdisklabel done err=%d\n", error);
 		if (error == EIO || error == ENXIO)
 			goto bad;
 		SC_DEBUG(link, SDEV_DB3, ("Disklabel loaded\n"));
