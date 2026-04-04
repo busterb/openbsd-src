@@ -1030,51 +1030,41 @@ sr_meta_native_bootprobe(struct sr_softc *sc, dev_t devno,
 	 */
 	chrdev = blktochr(devno);
 	rawdev = MAKEDISKDEV(major(chrdev), DISKUNIT(devno), RAW_PART);
-	printf("smnb: devno=0x%x chrdev=0x%x rawdev=0x%x\n",
-	    devno, chrdev, rawdev);
 	if (cdevvp(rawdev, &vn)) {
 		sr_error(sc, "sr_meta_native_bootprobe: cannot allocate vnode");
 		goto done;
 	}
 
 	/* open device */
-	printf("smnb: before VOP_OPEN\n");
 	error = VOP_OPEN(vn, FREAD, NOCRED, curproc);
 	if (error) {
 		DNPRINTF(SR_D_META, "%s: sr_meta_native_bootprobe open "
 		    "failed\n", DEVNAME(sc));
-		printf("smnb: VOP_OPEN failed %d\n", error);
 		vput(vn);
 		goto done;
 	}
-	printf("smnb: VOP_OPEN ok\n");
 
 	label = malloc(sizeof(*label), M_DEVBUF, M_WAITOK);
 
 	/* get disklabel */
-	printf("smnb: before DIOCGDINFO\n");
 	error = VOP_IOCTL(vn, DIOCGDINFO, (caddr_t)label, FREAD, NOCRED,
 	    curproc);
 	if (error) {
 		DNPRINTF(SR_D_META, "%s: sr_meta_native_bootprobe ioctl "
 		    "failed\n", DEVNAME(sc));
-		printf("smnb: DIOCGDINFO failed %d\n", error);
 		VOP_CLOSE(vn, FREAD, NOCRED, curproc);
 		vput(vn);
 		goto done;
 	}
-	printf("smnb: DIOCGDINFO ok\n");
 
 	/* we are done, close device */
 	error = VOP_CLOSE(vn, FREAD, NOCRED, curproc);
 	if (error) {
 		DNPRINTF(SR_D_META, "%s: sr_meta_native_bootprobe close "
 		    "failed\n", DEVNAME(sc));
-		printf("smnb: VOP_CLOSE failed %d\n", error);
 		vput(vn);
 		goto done;
 	}
-	printf("smnb: raw device done\n");
 	vput(vn);
 
 	md = malloc(SR_META_SIZE * DEV_BSIZE, M_DEVBUF, M_ZERO | M_NOWAIT);
@@ -1099,23 +1089,19 @@ sr_meta_native_bootprobe(struct sr_softc *sc, dev_t devno,
 
 		/* open partition */
 		rawdev = MAKEDISKDEV(major(devno), DISKUNIT(devno), i);
-		printf("smnb: found RAID part %d, rawdev=0x%x\n", i, rawdev);
 		if (bdevvp(rawdev, &vn)) {
 			sr_error(sc, "sr_meta_native_bootprobe: cannot "
 			    "allocate vnode for partition");
 			goto done;
 		}
-		printf("smnb: part %d VOP_OPEN\n", i);
 		error = VOP_OPEN(vn, FREAD, NOCRED, curproc);
 		if (error) {
 			DNPRINTF(SR_D_META, "%s: sr_meta_native_bootprobe "
 			    "open failed, partition %d\n",
 			    DEVNAME(sc), i);
-			printf("smnb: part %d open failed %d\n", i, error);
 			vput(vn);
 			continue;
 		}
-		printf("smnb: part %d open ok\n", i);
 
 		if (sr_meta_native_read(fake_sd, rawdev, md, NULL)) {
 			sr_error(sc, "native bootprobe could not read native "
@@ -1179,7 +1165,6 @@ sr_boot_assembly(struct sr_softc *sc)
 	int			rv = 0, i;
 
 	DNPRINTF(SR_D_META, "%s: sr_boot_assembly\n", DEVNAME(sc));
-	printf("sba: start\n");
 
 	SLIST_INIT(&sdklist);
 	SLIST_INIT(&bvh);
@@ -1210,26 +1195,21 @@ sr_boot_assembly(struct sr_softc *sc)
 		/* Only check sd(4) and wd(4) devices. */
 		if (strncmp(dk->dk_name, "sd", 2) &&
 		    strncmp(dk->dk_name, "wd", 2)) {
-			printf("sba: skip %s devno=0x%x\n",
-			    dk->dk_name, dk->dk_devno);
 			dk = TAILQ_NEXT(dk, dk_link);
 			continue;
 		}
 
 		/* native softraid uses partitions */
-		printf("sba: probe %s devno=0x%x\n", dk->dk_name, dk->dk_devno);
 		rw_enter_write(&sc->sc_lock);
 		bio_status_init(&sc->sc_status, &sc->sc_dev);
 		sr_meta_native_bootprobe(sc, dk->dk_devno, &bch);
 		rw_exit_write(&sc->sc_lock);
-		printf("sba: probe done\n");
 
 		/* probe non-native disks if native failed. */
 
 		/* Restart scan since we may have slept. */
 		dk = TAILQ_FIRST(&disklist);
 	}
-	printf("sba: disk loop done\n");
 
 	/*
 	 * Create a list of volumes and associate chunks with each volume.

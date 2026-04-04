@@ -1421,8 +1421,6 @@ setroot(struct device *bootdv, int part, int exitflags)
 #if defined(NFSCLIENT)
 	extern char *nfsbootdevname;
 #endif
-	printf("in setroot\n");
-
 	/* Ensure that all disk attach callbacks have completed. */
 	do {
 		TAILQ_FOREACH(dk, &disklist, dk_link) {

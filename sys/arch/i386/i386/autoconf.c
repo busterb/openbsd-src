@@ -206,12 +206,9 @@ diskconf(void)
 	char buf[128];
 	extern bios_bootmac_t *bios_bootmac;
 
-	printf("in diskconf");
 	dkcsumattach();
-	printf("1");
 
 	if ((bootdev & B_MAGICMASK) == (u_int)B_DEVMAGIC) {
-		printf("2");
 		majdev = B_TYPE(bootdev);
 		unit = B_UNIT(bootdev);
 		part = B_PARTITION(bootdev);
@@ -219,7 +216,6 @@ diskconf(void)
 		    unit, DL_PARTNUM2NAME(part));
 		bootdv = parsedisk(buf, strlen(buf), part, &tmpdev);
 	}
-	printf("3");
 
 	if (bios_bootmac) {
 		struct ifnet *ifp;
@@ -243,8 +239,6 @@ diskconf(void)
 			printf("PXE boot MAC address %s, interface %s\n",
 			    ether_sprintf(bios_bootmac->mac), "unknown");
 	}
-	printf("4");
-
 	setroot(bootdv, part, RB_USERREQ);
 	dumpconf();
 

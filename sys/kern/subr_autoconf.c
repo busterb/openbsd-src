@@ -299,13 +299,11 @@ config_rootsearch(cfmatch_t fn, char *rootname, void *aux)
 	 * with found-state here since only one instance of each possible
 	 * root child should ever be searched.
 	 */
-	printf("config_rootsearch\n");
 	for (p = cfroots; *p >= 0; p++) {
 		cf = &cfdata[*p];
 		if (cf->cf_fstate == FSTATE_DNOTFOUND ||
 		    cf->cf_fstate == FSTATE_DSTAR)
 			continue;
-		printf("%s\n", cf->cf_driver->cd_name);
 		if (strcmp(cf->cf_driver->cd_name, rootname) == 0)
 			mapply(&m, cf);
 	}
@@ -343,7 +341,6 @@ config_rootfound(char *rootname, void *aux)
 {
 	void *match;
 
-	printf("config_rootfound\n");
 	if ((match = config_rootsearch((cfmatch_t)NULL, rootname, aux)) != NULL)
 		return (config_attach(ROOT, match, aux, (cfprint_t)NULL));
 	printf("root device %s not configured\n", rootname);
