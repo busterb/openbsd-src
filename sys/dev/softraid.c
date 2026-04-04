@@ -1030,19 +1030,23 @@ sr_meta_native_bootprobe(struct sr_softc *sc, dev_t devno,
 	 */
 	chrdev = blktochr(devno);
 	rawdev = MAKEDISKDEV(major(chrdev), DISKUNIT(devno), RAW_PART);
+	printf("sr: smnb devno=0x%x rawdev=0x%x\n", devno, rawdev);
 	if (cdevvp(rawdev, &vn)) {
 		sr_error(sc, "sr_meta_native_bootprobe: cannot allocate vnode");
 		goto done;
 	}
 
 	/* open device */
+	printf("sr: smnb before VOP_OPEN\n");
 	error = VOP_OPEN(vn, FREAD, NOCRED, curproc);
 	if (error) {
 		DNPRINTF(SR_D_META, "%s: sr_meta_native_bootprobe open "
 		    "failed\n", DEVNAME(sc));
+		printf("sr: smnb VOP_OPEN failed %d\n", error);
 		vput(vn);
 		goto done;
 	}
+	printf("sr: smnb VOP_OPEN ok\n");
 
 	label = malloc(sizeof(*label), M_DEVBUF, M_WAITOK);
 
@@ -1165,6 +1169,7 @@ sr_boot_assembly(struct sr_softc *sc)
 	int			rv = 0, i;
 
 	DNPRINTF(SR_D_META, "%s: sr_boot_assembly\n", DEVNAME(sc));
+	printf("sr: sba start\n");
 
 	SLIST_INIT(&sdklist);
 	SLIST_INIT(&bvh);
@@ -1826,7 +1831,9 @@ sr_attach(struct device *parent, struct device *self, void *aux)
 
 	softraid_disk_attach = sr_disk_attach;
 
+	printf("sr: before taskq_barrier\n");
 	taskq_barrier(systq);
+	printf("sr: after taskq_barrier\n");
 	sr_boot_assembly(sc);
 
 	explicit_bzero(sr_bootkey, sizeof(sr_bootkey));
