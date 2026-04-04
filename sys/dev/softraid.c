@@ -1842,17 +1842,23 @@ sr_attach(struct device *parent, struct device *self, void *aux)
 	{
 		struct disk *dk;
 		int slept = 0;
+		printf("sr: wait loop enter\n");
 		do {
 			TAILQ_FOREACH(dk, &disklist, dk_link) {
 				if (dk->dk_devno != NODEV &&
 				    (dk->dk_flags & DKF_OPENED) == 0) {
+					printf("sr: waiting for %s flags=0x%x slept=%d\n",
+					    dk->dk_name, dk->dk_flags, slept);
 					tsleep_nsec(dk, PRIBIO, "srdkopen",
 					    SEC_TO_NSEC(1));
+					printf("sr: woke slept=%d\n", slept + 1);
 					slept++;
 					break;
 				}
 			}
 		} while (dk != NULL && slept < 5);
+		printf("sr: wait loop exit slept=%d dk=%s\n", slept,
+		    dk ? dk->dk_name : "NULL");
 	}
 	sr_boot_assembly(sc);
 
