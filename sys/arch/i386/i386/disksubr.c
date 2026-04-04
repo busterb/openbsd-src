@@ -67,8 +67,11 @@ readdisklabel(dev_t dev, void (*strat)(struct buf *),
 	dev_t devno;
 	int error;
 
+	printf("readdisklabel: enter dev=0x%x\n", dev);
 	if ((error = initdisklabel(lp)))
 		goto done;
+	printf("readdisklabel: initdisklabel done secsize=%u secpercyl=%u\n",
+	    lp->d_secsize, lp->d_secpercyl);
 
 	/* Look for any BIOS geometry information we should honour. */
 	devno = chrtoblk(dev);
@@ -90,10 +93,13 @@ readdisklabel(dev_t dev, void (*strat)(struct buf *),
 	}
 
 	/* get a buffer and initialize it */
+	printf("readdisklabel: calling geteblk secsize=%u\n", lp->d_secsize);
 	bp = geteblk(lp->d_secsize);
 	bp->b_dev = dev;
+	printf("readdisklabel: calling readdoslabel bp=%p\n", bp);
 
 	error = readdoslabel(bp, strat, lp, NULL, spoofonly);
+	printf("readdisklabel: readdoslabel done error=%d\n", error);
 	if (error == 0)
 		goto done;
 

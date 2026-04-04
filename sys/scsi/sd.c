@@ -539,6 +539,8 @@ sdstrategy(struct buf *bp)
 	struct sd_softc			*sc;
 	int				 s;
 
+	printf("sdstrategy: enter dev=0x%x blkno=%lld\n",
+	    bp->b_dev, (long long)bp->b_blkno);
 	sc = sdlookup(DISKUNIT(bp->b_dev));
 	if (sc == NULL) {
 		bp->b_error = ENXIO;
@@ -666,6 +668,7 @@ sdstart(struct scsi_xfer *xs)
 	u_int32_t			 nsecs;
 	int				 read;
 
+	printf("sdstart: enter\n");
 	if (ISSET(sc->flags, SDF_DYING)) {
 		scsi_xs_put(xs);
 		return;
@@ -726,6 +729,8 @@ sd_buf_done(struct scsi_xfer *xs)
 	struct sd_softc			*sc = xs->sc_link->device_softc;
 	struct buf			*bp = xs->cookie;
 	int				 error, s;
+
+	printf("sd_buf_done: enter error=%d\n", xs->error);
 
 	switch (xs->error) {
 	case XS_NOERROR:

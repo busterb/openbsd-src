@@ -295,7 +295,10 @@ readdisksector(struct buf *bp, void (*strat)(struct buf *),
 	CLR(bp->b_flags, B_READ | B_WRITE | B_DONE | B_ERROR);
 	SET(bp->b_flags, B_BUSY | B_READ | B_RAW);
 
+	printf("readdisksector: calling strat blkno=%lld\n",
+	    (long long)bp->b_blkno);
 	(*strat)(bp);
+	printf("readdisksector: strat returned, calling biowait\n");
 
 	return (biowait(bp));
 }
