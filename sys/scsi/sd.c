@@ -356,10 +356,12 @@ sdopen(dev_t dev, int flag, int fmt, struct proc *p)
 		}
 	} else {
 		/* Spin up non-UMASS devices ready or not. */
+		printf("sd%d: sdopen: scsi_start\n", unit);
 		if (!ISSET(link->flags, SDEV_UMASS))
 			scsi_start(link, SSS_START, (rawopen ? SCSI_SILENT :
 			    0) | SCSI_IGNORE_ILLEGAL_REQUEST |
 			    SCSI_IGNORE_MEDIA_CHANGE);
+		printf("sd%d: sdopen: scsi_start done\n", unit);
 
 		/*
 		 * Use sd_interpret_sense() for sense errors.
@@ -390,9 +392,12 @@ sdopen(dev_t dev, int flag, int fmt, struct proc *p)
 			error = ENXIO;
 			goto die;
 		}
+		printf("sd%d: sdopen: scsi_test_unit_ready\n", unit);
 		error = scsi_test_unit_ready(link,
 		    TEST_READY_RETRIES, SCSI_SILENT |
 		    SCSI_IGNORE_ILLEGAL_REQUEST | SCSI_IGNORE_MEDIA_CHANGE);
+		printf("sd%d: sdopen: scsi_test_unit_ready done error=%d\n",
+		    unit, error);
 		if (error) {
 			if (rawopen) {
 				error = 0;
@@ -406,6 +411,7 @@ sdopen(dev_t dev, int flag, int fmt, struct proc *p)
 			error = ENXIO;
 			goto die;
 		}
+		printf("sd%d: sdopen: sd_get_parms\n", unit);
 		SET(link->flags, SDEV_MEDIA_LOADED);
 		if (sd_get_parms(sc, (rawopen ? SCSI_SILENT : 0)) == -1) {
 			if (ISSET(sc->flags, SDF_DYING)) {
@@ -417,9 +423,13 @@ sdopen(dev_t dev, int flag, int fmt, struct proc *p)
 			goto bad;
 		}
 		SC_DEBUG(link, SDEV_DB3, ("Params loaded\n"));
+		printf("sd%d: sdopen: sd_get_parms done\n", unit);
 
 		/* Load the partition info if not already loaded. */
+		printf("sd%d: sdopen: sdgetdisklabel\n", unit);
 		error = sdgetdisklabel(dev, sc, sc->sc_dk.dk_label, 0);
+		printf("sd%d: sdopen: sdgetdisklabel done error=%d\n", unit,
+		    error);
 		if (error == EIO || error == ENXIO)
 			goto bad;
 		SC_DEBUG(link, SDEV_DB3, ("Disklabel loaded\n"));
