@@ -66,6 +66,8 @@
 
 #include "softraid.h"
 
+extern int kthread_create_now;
+
 #ifdef DEBUG
 #define DPRINTF(x...)	printf(x)
 #else
@@ -1096,16 +1098,27 @@ disk_attach(struct device *dv, struct disk *diskp)
 			    MAKEDISKDEV(majdev, dv->dv_unit, RAW_PART);
 
 		if (diskp->dk_devno != NODEV) {
-			struct disk_attach_task *dat;
+			/*
+			 * If the systq kthread hasn't been created yet (early
+			 * in boot, before kthread_run_deferred_queue), mark
+			 * the disk as opened immediately.  The disk_attach_
+			 * callback task cannot run until systq is running, and
+			 * softraid's boot assembly must not race with it.
+			 */
+			if (!kthread_create_now) {
+				diskp->dk_flags |= DKF_OPENED;
+			} else {
+				struct disk_attach_task *dat;
 
-			dat = malloc(sizeof(*dat), M_TEMP, M_WAITOK);
+				dat = malloc(sizeof(*dat), M_TEMP, M_WAITOK);
 
-			/* XXX: Assumes dk is part of the device softc. */
-			device_ref(dv);
-			dat->dk = diskp;
+				/* XXX: Assumes dk is part of the device softc. */
+				device_ref(dv);
+				dat->dk = diskp;
 
-			task_set(&dat->task, disk_attach_callback, dat);
-			task_add(systq, &dat->task);
+				task_set(&dat->task, disk_attach_callback, dat);
+				task_add(systq, &dat->task);
+			}
 		}
 	}
 
