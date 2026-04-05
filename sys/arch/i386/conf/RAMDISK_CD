@@ -28,6 +28,7 @@ config		bsd root on rd0a swap on rd0b and wd0b and sd0b
 mainbus0	at root
 
 pvbus0		at mainbus0	# Paravirtual device bus
+pvclock0	at pvbus?	# KVM/VMD paravirtual clock
 
 acpi0		at bios?
 #acpitimer*	at acpi?
