@@ -293,6 +293,8 @@ virtio_check_vq(struct virtio_softc *sc, struct virtqueue *vq)
 		vq_sync_aring(sc, vq, BUS_DMASYNC_POSTWRITE);
 	}
 	vq_sync_uring(sc, vq, BUS_DMASYNC_POSTREAD);
+	printf("virtio_check_vq: used_idx=%u used->idx=%u\n",
+	    vq->vq_used_idx, vq->vq_used->idx);
 	if (vq->vq_used_idx != vq->vq_used->idx) {
 		if (vq->vq_done)
 			return (vq->vq_done)(vq);

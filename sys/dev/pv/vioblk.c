@@ -319,6 +319,7 @@ vioblk_vq_done(struct virtqueue *vq)
 	int slot;
 	int ret = 0;
 
+	printf("vioblk_vq_done: notify_on_empty=%d\n", sc->sc_notify_on_empty);
 	if (!sc->sc_notify_on_empty)
 		virtio_stop_vq_intr(vsc, vq);
 	for (;;) {

@@ -1149,6 +1149,7 @@ virtio_pci_legacy_intr(void *arg)
 
 	/* check and ack the interrupt */
 	isr = bus_space_read_1(sc->sc_isr_iot, sc->sc_isr_ioh, 0);
+	printf("virtio_pci_legacy_intr: isr=0x%x\n", isr);
 	if (isr == 0)
 		return 0;
 	KERNEL_LOCK();
