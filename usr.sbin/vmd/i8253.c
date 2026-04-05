@@ -262,12 +262,24 @@ vcpu_exit_i8253(struct vm_run_params *vrp)
 					    ticks % i8253_channel[sel].start;
 				} else
 					i8253_channel[sel].olatch = 0;
+				/*
+				 * On real hardware, the LATCH command resets
+				 * the output byte flip-flop so the next read
+				 * returns the low byte first.
+				 */
+				i8253_channel[sel].last_r = 1;
 				goto ret;
 			} else if (rw != TIMER_16BIT) {
 				log_warnx("%s: i8253 PIT: unsupported counter "
 				    "%d rw mode 0x%x selected", __func__,
 				    sel, (rw & TIMER_16BIT));
 			}
+			/*
+			 * On real hardware, writing a new mode/control word
+			 * resets the write byte flip-flop so the next count
+			 * load starts with the low byte.
+			 */
+			i8253_channel[sel].last_w = 0;
 			i8253_channel[sel].mode = (out_data & 0xe) >> 1;
 
 			goto ret;
@@ -292,6 +304,18 @@ vcpu_exit_i8253(struct vm_run_params *vrp)
 
 				if (i8253_channel[sel].start == 0)
 					i8253_channel[sel].start = 0xffff;
+
+				/*
+				 * Set ts now, in the vCPU thread, so that any
+				 * LATCH command issued before the async
+				 * i8253_reset (event thread) runs will use a
+				 * fresh origin for elapsed-tick calculation.
+				 * Without this, latch reads between here and
+				 * i8253_reset see the new start value but the
+				 * old ts, producing a wrong counter snapshot.
+				 */
+				clock_gettime(CLOCK_MONOTONIC,
+				    &i8253_channel[sel].ts);
 
 				DPRINTF("%s: channel %d reset, mode=%d, "
 				    "start=%d\n", __func__,
@@ -344,7 +368,6 @@ i8253_reset(uint8_t chn)
 	i8253_channel[chn].in_use = 1;
 	i8253_channel[chn].state = 0;
 	tv.tv_usec = (i8253_channel[chn].start * NS_PER_TICK) / 1000;
-	clock_gettime(CLOCK_MONOTONIC, &i8253_channel[chn].ts);
 	evtimer_add(&i8253_channel[chn].timer, &tv);
 }
 
