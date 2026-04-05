@@ -262,7 +262,7 @@ vcpu_exit_i8253(struct vm_run_params *vrp)
 					    ticks % i8253_channel[sel].start;
 				} else
 					i8253_channel[sel].olatch = 0;
-				i8253_channel[sel].last_r = 1;
+				i8253_channel[sel].last_r = 2;
 				goto ret;
 			} else if (rw != TIMER_16BIT) {
 				log_warnx("%s: i8253 PIT: unsupported counter "
