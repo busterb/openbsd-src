@@ -268,6 +268,7 @@ dump_insn(struct x86_insn *insn)
 }
 #endif /* MMIO_DEBUG */
 
+#if MMIO_DEBUG
 static const char *
 str_cpu_mode(int mode)
 {
@@ -280,6 +281,7 @@ str_cpu_mode(int mode)
 	default: return "UKNOWN";
 	}
 }
+#endif /* MMIO_DEBUG */
 
 __unused static const char *
 str_decode_res(enum decode_result res) {
@@ -306,6 +308,7 @@ str_opcode(struct x86_opcode *opcode)
 	}
 }
 
+#if MMIO_DEBUG
 static const char *
 str_operand_enc(struct x86_opcode *opcode)
 {
@@ -361,6 +364,7 @@ str_sreg(int sreg) {
 	default: return "UKNOWN";
 	}
 }
+#endif /* MMIO_DEBUG */
 
 static int
 detect_cpu_mode(struct vcpu_reg_state *vrs)
