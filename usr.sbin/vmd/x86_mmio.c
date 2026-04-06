@@ -604,18 +604,24 @@ decode_disp(struct x86_decode_state *state, struct x86_insn *insn)
 	enum decode_result res = DECODE_ERROR;
 	uint64_t disp = 0;
 
-	if (!is_valid_state(state, __func__) || insn == NULL)
+	if (state == NULL || insn == NULL)
 		return (DECODE_ERROR);
 
-	if (!insn->insn_modrm_valid)
-		return (DECODE_ERROR);
+	if (!insn->insn_modrm_valid) {
+		/* No ModRM (e.g. FD/TD encoding): no displacement to read. */
+		return (DECODE_MORE);
+	}
 
 	switch (MODRM_MOD(insn->insn_modrm)) {
 	case 0x00:
+		/* mod=0: no displacement (except the rm=5 abs-addr special
+		 * case, which we leave for the caller to handle via disp). */
 		insn->insn_disp_type = DISP_0;
 		res = DECODE_MORE;
 		break;
 	case 0x01:
+		if (!is_valid_state(state, __func__))
+			return (DECODE_ERROR);
 		insn->insn_disp_type = DISP_1;
 		res = next_value(state, 1, &disp);
 		if (res == DECODE_ERROR)
@@ -623,6 +629,8 @@ decode_disp(struct x86_decode_state *state, struct x86_insn *insn)
 		insn->insn_disp = disp;
 		break;
 	case 0x02:
+		if (!is_valid_state(state, __func__))
+			return (DECODE_ERROR);
 		if (insn->insn_prefix.pfx_group4 == LEG_4_ADDRSZ) {
 			insn->insn_disp_type = DISP_2;
 			res = next_value(state, 2, &disp);
@@ -635,6 +643,7 @@ decode_disp(struct x86_decode_state *state, struct x86_insn *insn)
 		insn->insn_disp = disp;
 		break;
 	default:
+		/* mod=3: register operand, no displacement. */
 		insn->insn_disp_type = DISP_NONE;
 		res = DECODE_MORE;
 	}
