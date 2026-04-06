@@ -614,10 +614,22 @@ decode_disp(struct x86_decode_state *state, struct x86_insn *insn)
 
 	switch (MODRM_MOD(insn->insn_modrm)) {
 	case 0x00:
-		/* mod=0: no displacement (except the rm=5 abs-addr special
-		 * case, which we leave for the caller to handle via disp). */
-		insn->insn_disp_type = DISP_0;
-		res = DECODE_MORE;
+		if (MODRM_RM(insn->insn_modrm) == 0x05) {
+			/*
+			 * mod=0 rm=5: 32-bit absolute address (32-bit mode) or
+			 * RIP-relative (64-bit mode). Either way consume 4 bytes.
+			 */
+			if (!is_valid_state(state, __func__))
+				return (DECODE_ERROR);
+			insn->insn_disp_type = DISP_4;
+			res = next_value(state, 4, &disp);
+			if (res == DECODE_ERROR)
+				return (res);
+			insn->insn_disp = disp;
+		} else {
+			insn->insn_disp_type = DISP_0;
+			res = DECODE_MORE;
+		}
 		break;
 	case 0x01:
 		if (!is_valid_state(state, __func__))
