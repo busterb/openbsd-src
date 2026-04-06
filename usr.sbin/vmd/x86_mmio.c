@@ -237,7 +237,7 @@ is_valid_state(struct x86_decode_state *state, const char *fn_name)
 	return (1);
 }
 
-#ifdef MMIO_DEBUG
+#if MMIO_DEBUG
 static void
 dump_regs(struct vcpu_reg_state *vrs)
 {
@@ -865,14 +865,14 @@ insn_decode(struct vm_exit *exit, struct x86_insn *insn)
 	mode = detect_cpu_mode(vrs);
 	if (mode == VMM_CPU_MODE_UNKNOWN) {
 		log_warnx("%s: failed to identify cpu mode", __func__);
-#ifdef MMIO_DEBUG
+#if MMIO_DEBUG
 		dump_regs(vrs);
 #endif
 		return (-1);
 	}
 	insn->insn_cpu_mode = mode;
 
-#ifdef MMIO_DEBUG
+#if MMIO_DEBUG
 	log_info("%s: cpu mode %s detected", __progname, str_cpu_mode(mode));
 	printf("%s: got bytes: [ ", __progname);
 	for (int i = 0; i < len; i++) {
@@ -888,7 +888,7 @@ insn_decode(struct vm_exit *exit, struct x86_insn *insn)
 	} else if (res == DECODE_DONE)
 		goto done;
 
-#ifdef MMIO_DEBUG
+#if MMIO_DEBUG
 	log_info("%s: prefixes {g1: 0x%02x, g2: 0x%02x, g3: 0x%02x, g4: 0x%02x,"
 	    " rex: 0x%02x }", __progname, insn->insn_prefix.pfx_group1,
 	    insn->insn_prefix.pfx_group2, insn->insn_prefix.pfx_group3,
@@ -903,7 +903,7 @@ insn_decode(struct vm_exit *exit, struct x86_insn *insn)
 	} else if (res == DECODE_DONE)
 		goto done;
 
-#ifdef MMIO_DEBUG
+#if MMIO_DEBUG
 	log_info("%s: found opcode %s (operand encoding %s) (%s)", __progname,
 	    str_opcode(&insn->insn_opcode), str_operand_enc(&insn->insn_opcode),
 	    str_decode_res(res));
@@ -922,7 +922,7 @@ insn_decode(struct vm_exit *exit, struct x86_insn *insn)
 	if (res == DECODE_DONE)
 		goto done;
 
-#ifdef MMIO_DEBUG
+#if MMIO_DEBUG
 	if (insn->insn_modrm_valid)
 		log_info("%s: found ModRM 0x%02x (%s)", __progname,
 		    insn->insn_modrm, str_decode_res(res));
@@ -936,7 +936,7 @@ insn_decode(struct vm_exit *exit, struct x86_insn *insn)
 	} else if (res == DECODE_DONE)
 		goto done;
 
-#ifdef MMIO_DEBUG
+#if MMIO_DEBUG
 	if (insn->insn_sib_valid)
 		log_info("%s: found SIB 0x%02x (%s)", __progname,
 		    insn->insn_sib, str_decode_res(res));
@@ -960,7 +960,7 @@ insn_decode(struct vm_exit *exit, struct x86_insn *insn)
 done:
 	insn->insn_bytes_len = state.s_idx;
 
-#ifdef MMIO_DEBUG
+#if MMIO_DEBUG
 	log_info("%s: final instruction length is %u", __func__,
 		insn->insn_bytes_len);
 	dump_insn(insn);
@@ -972,7 +972,7 @@ done:
 	return (0);
 
 err:
-#ifdef MMIO_DEBUG
+#if MMIO_DEBUG
 	dump_insn(insn);
 	log_info("%s: modrm: {mod: %d, regop: %d, rm: %d}", __func__,
 	    MODRM_MOD(insn->insn_modrm), MODRM_REGOP(insn->insn_modrm),
