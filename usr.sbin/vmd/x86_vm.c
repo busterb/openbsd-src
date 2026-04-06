@@ -15,6 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -37,6 +38,7 @@
 #include "i8259.h"
 #include "loadfile.h"
 #include "mc146818.h"
+#include "mmio.h"
 #include "ns8250.h"
 #include "pci.h"
 #include "virtio.h"
