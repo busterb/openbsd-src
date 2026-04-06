@@ -608,7 +608,33 @@ decode_disp(struct x86_decode_state *state, struct x86_insn *insn)
 		return (DECODE_ERROR);
 
 	if (!insn->insn_modrm_valid) {
-		/* No ModRM (e.g. FD/TD encoding): no displacement to read. */
+		/*
+		 * FD/TD encoding: the bytes after the opcode are a memory
+		 * offset (moffset), not a ModRM-based displacement. Consume
+		 * them here so insn_bytes_len accounts for the full instruction.
+		 * Address size: 4 bytes in PROT32/LONG (default), 2 in REAL or
+		 * with an address-size override prefix.
+		 */
+		if (insn->insn_opcode.op_encoding == OP_ENC_FD ||
+		    insn->insn_opcode.op_encoding == OP_ENC_TD) {
+			size_t addr_bytes;
+			if (insn->insn_cpu_mode == VMM_CPU_MODE_REAL ||
+			    insn->insn_prefix.pfx_group4 == LEG_4_ADDRSZ)
+				addr_bytes = 2;
+			else if (insn->insn_cpu_mode == VMM_CPU_MODE_LONG &&
+			    (insn->insn_prefix.pfx_rex & REX_W))
+				addr_bytes = 8;
+			else
+				addr_bytes = 4;
+			if (!is_valid_state(state, __func__))
+				return (DECODE_ERROR);
+			res = next_value(state, addr_bytes, &disp);
+			if (res == DECODE_ERROR)
+				return (res);
+			insn->insn_disp = disp;
+			insn->insn_disp_type = DISP_4; /* reuse; means "have addr" */
+			insn->insn_gva = (vaddr_t)disp;
+		}
 		return (DECODE_MORE);
 	}
 
@@ -958,10 +984,12 @@ emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 {
 	switch (insn->insn_opcode.op_encoding) {
 	case OP_ENC_RM:
+	case OP_ENC_FD:
 		/* Read from MMIO: no device emulation yet, fill with 0xFFs. */
 		exit->vrs.vrs_gprs[insn->insn_reg] = 0xFFFFFFFFFFFFFFFF;
 		break;
 	case OP_ENC_MR:
+	case OP_ENC_TD:
 		/* Write to MMIO: no device emulation yet, discard. */
 		break;
 	default:
