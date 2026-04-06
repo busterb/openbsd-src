@@ -782,12 +782,15 @@ decode_imm(struct x86_decode_state *state, struct x86_insn *insn)
 	size_t num_bytes;
 	uint64_t value;
 
-	if (!is_valid_state(state, __func__) || insn == NULL)
+	if (insn == NULL)
 		return (DECODE_ERROR);
 
 	/* Only handle MI encoded instructions. Others shouldn't need assist. */
 	if (insn->insn_opcode.op_encoding != OP_ENC_MI)
 		return (DECODE_DONE);
+
+	if (!is_valid_state(state, __func__))
+		return (DECODE_ERROR);
 
 	/* Exceptions related to MOV instructions. */
 	if (insn->insn_opcode.op_type == OP_MOV) {
