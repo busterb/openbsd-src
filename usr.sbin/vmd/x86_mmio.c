@@ -935,12 +935,17 @@ err:
 static int
 emulate_mov(struct x86_insn *insn, struct vm_exit *exit)
 {
-	/* XXX Only supports read to register for now */
-	if (insn->insn_opcode.op_encoding != OP_ENC_RM)
+	switch (insn->insn_opcode.op_encoding) {
+	case OP_ENC_RM:
+		/* Read from MMIO: no device emulation yet, fill with 0xFFs. */
+		exit->vrs.vrs_gprs[insn->insn_reg] = 0xFFFFFFFFFFFFFFFF;
+		break;
+	case OP_ENC_MR:
+		/* Write to MMIO: no device emulation yet, discard. */
+		break;
+	default:
 		return (-1);
-
-	/* XXX No device emulation yet. Fill with 0xFFs. */
-	exit->vrs.vrs_gprs[insn->insn_reg] = 0xFFFFFFFFFFFFFFFF;
+	}
 
 	return (0);
 }

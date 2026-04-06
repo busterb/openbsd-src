@@ -208,30 +208,43 @@ create_memory_map(struct vmd_vm *vm)
 		above_4g = 0;
 	}
 
+	int n = 2;
+
 	/* Third memory region: area above 1MB to MMIO region */
-	vmc->vmc_memranges[2].vmr_gpa = MB(1);
-	vmc->vmc_memranges[2].vmr_size = above_1m;
-	vmc->vmc_memranges[2].vmr_type = VM_MEM_RAM;
+	vmc->vmc_memranges[n].vmr_gpa = MB(1);
+	vmc->vmc_memranges[n].vmr_size = above_1m;
+	vmc->vmc_memranges[n++].vmr_type = VM_MEM_RAM;
 
-	/* Fourth region: PCI MMIO range */
-	vmc->vmc_memranges[3].vmr_gpa = PCI_MMIO_BAR_BASE;
-	vmc->vmc_memranges[3].vmr_size = PCI_MMIO_BAR_END -
-	    PCI_MMIO_BAR_BASE + 1;
-	vmc->vmc_memranges[3].vmr_type = VM_MEM_MMIO;
+	/*
+	 * Cover the gap between the top of RAM and the PCI MMIO region
+	 * with a sparse MMIO range. Without this, guest accesses to the
+	 * unmapped space (e.g. PCIe MMCONFIG bus scans) hit an unrecognized
+	 * GPA in vmm(4), which terminates the VM.
+	 */
+	if (MB(1) + above_1m < PCI_MMIO_BAR_BASE) {
+		vmc->vmc_memranges[n].vmr_gpa = MB(1) + above_1m;
+		vmc->vmc_memranges[n].vmr_size =
+		    PCI_MMIO_BAR_BASE - (MB(1) + above_1m);
+		vmc->vmc_memranges[n++].vmr_type = VM_MEM_MMIO;
+	}
 
-	/* Fifth region: 2nd copy of BIOS above MMIO ending at 4GB */
-	vmc->vmc_memranges[4].vmr_gpa = PCI_MMIO_BAR_END + 1;
-	vmc->vmc_memranges[4].vmr_size = MB(4);
-	vmc->vmc_memranges[4].vmr_type = VM_MEM_RESERVED;
+	/* PCI MMIO range */
+	vmc->vmc_memranges[n].vmr_gpa = PCI_MMIO_BAR_BASE;
+	vmc->vmc_memranges[n].vmr_size = PCI_MMIO_BAR_END - PCI_MMIO_BAR_BASE + 1;
+	vmc->vmc_memranges[n++].vmr_type = VM_MEM_MMIO;
 
-	/* Sixth region: any remainder above 4GB */
+	/* 2nd copy of BIOS above MMIO ending at 4GB */
+	vmc->vmc_memranges[n].vmr_gpa = PCI_MMIO_BAR_END + 1;
+	vmc->vmc_memranges[n].vmr_size = MB(4);
+	vmc->vmc_memranges[n++].vmr_type = VM_MEM_RESERVED;
+
+	/* Any remainder above 4GB */
 	if (above_4g > 0) {
-		vmc->vmc_memranges[5].vmr_gpa = GB(4);
-		vmc->vmc_memranges[5].vmr_size = above_4g;
-		vmc->vmc_memranges[5].vmr_type = VM_MEM_RAM;
-		vmc->vmc_nmemranges = 6;
-	} else
-		vmc->vmc_nmemranges = 5;
+		vmc->vmc_memranges[n].vmr_gpa = GB(4);
+		vmc->vmc_memranges[n].vmr_size = above_4g;
+		vmc->vmc_memranges[n++].vmr_type = VM_MEM_RAM;
+	}
+	vmc->vmc_nmemranges = n;
 }
 
 int
@@ -567,16 +580,14 @@ vcpu_exit_eptviolation(struct vm_run_params *vrp)
 {
 	struct vm_exit *ve = vrp->vrp_exit;
 	int ret = 0;
-#if MMIO_NOTYET
 	struct x86_insn insn;
 	uint64_t va, pa;
 	size_t len = 15;		/* Max instruction length in x86. */
-#endif /* MMIO_NOTYET */
+
 	switch (ve->vee.vee_fault_type) {
 	case VEE_FAULT_HANDLED:
 		break;
 
-#if MMIO_NOTYET
 	case VEE_FAULT_MMIO_ASSIST:
 		/* Intel VMX might give us the length of the instruction. */
 		if (ve->vee.vee_insn_info & VEE_LEN_VALID)
@@ -619,7 +630,6 @@ vcpu_exit_eptviolation(struct vm_run_params *vrp)
 		if (ret == 0)
 			ret = insn_emulate(ve, &insn);
 		break;
-#endif /* MMIO_NOTYET */
 
 	case VEE_FAULT_PROTECT:
 		log_debug("EPT Violation: rip=0x%llx",
