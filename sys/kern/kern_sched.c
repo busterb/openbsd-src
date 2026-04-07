@@ -449,9 +449,10 @@ sched_choosecpu_fork(struct proc *parent, int flags)
 
 #ifdef __HAVE_CPU_TOPOLOGY
 	/*
-	 * Iterate CPUs in capacity order: highest-capacity first for normal
-	 * work so that fast cores win ties; reversed for background (niced)
-	 * work so that slow cores absorb it without competing with fast ones.
+	 * Iterate CPUs in capacity order, highest first, so that fast cores
+	 * win ties for both normal and background work.  Normal work skips
+	 * L cores entirely; background work includes them so that L cores
+	 * absorb spillover only when all P/E cores are already busy.
 	 * When sched_cap_order is off, fall back to cpuset (CPU-number) order.
 	 */
 	{
@@ -459,9 +460,7 @@ sched_choosecpu_fork(struct proc *parent, int flags)
 
 		if (sched_cap_order) {
 			int i, n = sched_ncpus_order;
-			for (i = background ? n - 1 : 0;
-			    background ? i >= 0 : i < n;
-			    i += background ? -1 : 1) {
+			for (i = 0; i < n; i++) {
 				ci = sched_cpu_order[i];
 				if (!cpuset_isset(&set, ci))
 					continue;
@@ -554,9 +553,10 @@ sched_choosecpu(struct proc *p)
 
 #ifdef __HAVE_CPU_TOPOLOGY
 	/*
-	 * Iterate CPUs in capacity order: highest-capacity first for normal
-	 * work so that fast cores win ties; reversed for background (niced)
-	 * work so that slow cores absorb it without competing with fast ones.
+	 * Iterate CPUs in capacity order, highest first, so that fast cores
+	 * win ties for both normal and background work.  Normal work skips
+	 * L cores entirely; background work includes them so that L cores
+	 * absorb spillover only when all P/E cores are already busy.
 	 * When sched_cap_order is off, fall back to cpuset (CPU-number) order.
 	 */
 	{
@@ -564,9 +564,7 @@ sched_choosecpu(struct proc *p)
 
 		if (sched_cap_order) {
 			int i, n = sched_ncpus_order;
-			for (i = background ? n - 1 : 0;
-			    background ? i >= 0 : i < n;
-			    i += background ? -1 : 1) {
+			for (i = 0; i < n; i++) {
 				int cost;
 				ci = sched_cpu_order[i];
 				if (!cpuset_isset(&set, ci))
