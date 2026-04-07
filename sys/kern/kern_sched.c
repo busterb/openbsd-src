@@ -461,6 +461,8 @@ sched_choosecpu_fork(struct proc *parent, int flags)
 			ci = sched_cpu_order[i];
 			if (!cpuset_isset(&set, ci))
 				continue;
+			if (!background && ci->ci_cputype == CPUTYP_L)
+				continue;
 			run = ci->ci_schedstate.spc_nrun;
 			if (choice == NULL || run < best_run) {
 				choice = ci;
@@ -516,11 +518,17 @@ sched_choosecpu(struct proc *p)
 	 * this is simple.
 	 * Also, our cpu might not be idle, but if it's the current cpu
 	 * and it has nothing else queued and we're curproc, take it.
+	 * Don't take this fast path for normal processes on L cores;
+	 * they must move to a P or E core.
 	 */
-	if (cpuset_isset(&set, p->p_cpu) ||
+	if ((cpuset_isset(&set, p->p_cpu) ||
 	    (p->p_cpu == curcpu() && p->p_cpu->ci_schedstate.spc_nrun == 0 &&
 	    (p->p_cpu->ci_schedstate.spc_schedflags & SPCF_SHOULDHALT) == 0 &&
-	    curproc == p)) {
+	    curproc == p))
+#ifdef __HAVE_CPU_TOPOLOGY
+	    && (p->p_p->ps_nice > NZERO || p->p_cpu->ci_cputype != CPUTYP_L)
+#endif
+	    ) {
 		sched_wasidle++;
 		return (p->p_cpu);
 	}
@@ -544,6 +552,8 @@ sched_choosecpu(struct proc *p)
 			int cost;
 			ci = sched_cpu_order[i];
 			if (!cpuset_isset(&set, ci))
+				continue;
+			if (!background && ci->ci_cputype == CPUTYP_L)
 				continue;
 			cost = sched_proc_to_cpu_cost(ci, p);
 			if (choice == NULL || cost < last_cost) {
@@ -608,6 +618,15 @@ sched_steal_proc(struct cpu_info *self)
 		TAILQ_FOREACH(p, &spc->spc_qs[queue], p_runq) {
 			if (p->p_flag & P_CPUPEG)
 				continue;
+#ifdef __HAVE_CPU_TOPOLOGY
+			/*
+			 * L cores only run background work; don't let them
+			 * steal normal processes from P or E cores.
+			 */
+			if (self->ci_cputype == CPUTYP_L &&
+			    p->p_p->ps_nice <= NZERO)
+				continue;
+#endif
 			cost = sched_proc_to_cpu_cost(self, p);
 
 			if (best == NULL || cost < bestcost) {
