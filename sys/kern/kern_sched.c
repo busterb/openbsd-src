@@ -787,9 +787,15 @@ sched_proc_to_cpu_cost(struct cpu_info *ci, struct proc *p)
 	 *
 	 * XXX Needs to be revisited when we distribute interrupts
 	 * over cpus.
+	 *
+	 * On capacity-ordered systems the primary CPU is not necessarily
+	 * special for interrupt load; skip the penalty so the scheduler
+	 * uses it according to its measured capacity like any other core.
 	 */
+#ifndef __HAVE_CPU_TOPOLOGY
 	if (CPU_IS_PRIMARY(ci))
 		cost += sched_cost_runnable;
+#endif
 
 	/*
 	 * If the proc is on this cpu already, lower the cost by how much
