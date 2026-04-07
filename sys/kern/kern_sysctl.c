@@ -885,6 +885,8 @@ hw_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 #ifdef __HAVE_CPU_TOPOLOGY
 	case HW_SMT:
 	case HW_BLOCKCPU:
+	case HW_SCHEDCAPORDER:
+	case HW_SCHEDLCORES:
 #endif
 #endif /* !SMALL_KERNEL */
 	{
@@ -987,6 +989,10 @@ hw_sysctl_locked(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 		return (sysctl_hwsmt(oldp, oldlenp, newp, newlen));
 	case HW_BLOCKCPU:
 		return (sysctl_hwblockcpu(oldp, oldlenp, newp, newlen));
+	case HW_SCHEDCAPORDER:
+		return (sysctl_hwschedcaporder(oldp, oldlenp, newp, newlen));
+	case HW_SCHEDLCORES:
+		return (sysctl_hwschedlcores(oldp, oldlenp, newp, newlen));
 #endif
 	case HW_BATTERY:
 		return (sysctl_hwbattery(name + 1, namelen - 1, oldp, oldlenp,

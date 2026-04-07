@@ -927,7 +927,9 @@ struct kinfo_file {
 #define	HW_BATTERY		27	/* node: battery */
 #define	HW_UCOMNAMES		28	/* strings: ucom names */
 #define	HW_BLOCKCPU		29	/* string: cpu types to block */
-#define	HW_MAXID		30	/* number of valid hw ids */
+#define	HW_SCHEDCAPORDER	30	/* int: order CPUs by capacity */
+#define	HW_SCHEDLCORES		31	/* int: schedule on L cores */
+#define	HW_MAXID		32	/* number of valid hw ids */
 
 #define	CTL_HW_NAMES { \
 	{ 0, 0 }, \
@@ -960,6 +962,8 @@ struct kinfo_file {
 	{ "battery", CTLTYPE_NODE }, \
 	{ "ucomnames", CTLTYPE_STRING }, \
 	{ "blockcpu", CTLTYPE_STRING }, \
+	{ "schedcaporder", CTLTYPE_INT }, \
+	{ "schedlcores", CTLTYPE_INT }, \
 }
 
 /*

@@ -180,7 +180,11 @@ int sysctl_hwsetperf(void *, size_t *, void *, size_t);
 int sysctl_hwperfpolicy(void *, size_t *, void *, size_t);
 int sysctl_hwsmt(void *, size_t *, void *, size_t);
 int sysctl_hwblockcpu(void *, size_t *, void *, size_t);
+int sysctl_hwschedcaporder(void *, size_t *, void *, size_t);
+int sysctl_hwschedlcores(void *, size_t *, void *, size_t);
 int sysctl_hwncpuonline(void);
+extern int sched_cap_order;
+extern int sched_use_lcores;
 
 #define CPUTYP_SMT	0x01	/* SMT cpu */
 #define CPUTYP_P	0x02	/* Performance core */
