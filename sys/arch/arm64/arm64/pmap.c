@@ -1506,6 +1506,18 @@ pmap_deactivate(struct proc *p)
 	if (pm->pm_active == 0)
 		return;
 
+	/*
+	 * Flush this pmap's TLB entries on the local CPU before switching
+	 * away.  This ensures that after decrementing pm_active, no CPU
+	 * retains live TLB entries for this ASID without being reflected
+	 * in pm_active.  pmap_protect can then safely use a local-only
+	 * TLBI ASIDE1 instead of a broadcast TLBI ASIDE1IS whenever
+	 * pm_active == 1 (only the current CPU is active).
+	 */
+	cpu_tlb_flush_asid_all_local((uint64_t)pm->pm_asid << 48);
+	cpu_tlb_flush_asid_all_local(
+	    (uint64_t)(pm->pm_asid | ASID_USER) << 48);
+
 	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
 	__asm volatile("isb");
 
@@ -1719,7 +1731,19 @@ pmap_protect(pmap_t pm, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 				pmap_page_ro_noflush(pm, sva, prot);
 				sva += PAGE_SIZE;
 			}
-			if (pm->pm_active) {
+			if (pm->pm_active == 1) {
+				/*
+				 * Only the current CPU has this pmap active,
+				 * and pmap_deactivate always flushes on exit,
+				 * so no other CPU has live TLB entries for this
+				 * ASID.  Use a local-only TLBI ASIDE1 to avoid
+				 * the broadcast stall.
+				 */
+				cpu_tlb_flush_asid_all_local(
+				    (uint64_t)pm->pm_asid << 48);
+				cpu_tlb_flush_asid_all_local(
+				    (uint64_t)(pm->pm_asid | ASID_USER) << 48);
+			} else if (pm->pm_active > 1) {
 				cpu_tlb_flush_asid_all(
 				    (uint64_t)pm->pm_asid << 48);
 				cpu_tlb_flush_asid_all(

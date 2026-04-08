@@ -134,6 +134,23 @@ ENTRY(cpu_tlb_flush_asid_all)
 END(cpu_tlb_flush_asid_all)
 
 /*
+ * void cpu_tlb_flush_asid_all_local(uint64_t)
+ *
+ * Invalidate all TLB entries for the given ASID on the local CPU only.
+ * Use when only one CPU has this pmap active (pm_active == 1) or when
+ * flushing this CPU's entries on pmap deactivation.
+ */
+ENTRY(cpu_tlb_flush_asid_all_local)
+	RETGUARD_SETUP(cpu_tlb_flush_asid_all_local, x15)
+	dsb	ishst
+	tlbi	aside1, x0
+	dsb	ish
+	isb
+	RETGUARD_CHECK(cpu_tlb_flush_asid_all_local, x15)
+	ret
+END(cpu_tlb_flush_asid_all_local)
+
+/*
  * void cpu_dcache_wb_range(vaddr_t, vsize_t)
  */
 ENTRY(cpu_dcache_wb_range)
