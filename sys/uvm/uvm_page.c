@@ -184,9 +184,11 @@ uvm_page_init(vaddr_t *kvm_startp, vaddr_t *kvm_endp)
 	 * init the page queues and page queue locks
 	 */
 
-	TAILQ_INIT(&uvm.page_active);
-	TAILQ_INIT(&uvm.page_inactive);
-	mtx_init(&uvm.pageqlock, IPL_VM);
+	for (int qi = 0; qi < UVM_NUM_PAGEQ; qi++) {
+		TAILQ_INIT(&uvm.pageqs[qi].active);
+		TAILQ_INIT(&uvm.pageqs[qi].inactive);
+		mtx_init(&uvm.pageqs[qi].lock, IPL_VM);
+	}
 	mtx_init(&uvm.fpageqlock, IPL_VM);
 	uvm_pmr_init();
 
@@ -976,9 +978,9 @@ uvm_pageclean(struct vm_page *pg)
 	 * now remove the page from the queues
 	 */
 	if (pg->pg_flags & (PQ_ACTIVE|PQ_INACTIVE)) {
-		uvm_lock_pageq();
+		uvm_lock_pageq_pg(pg);
 		uvm_pagedequeue(pg);
-		uvm_unlock_pageq();
+		uvm_unlock_pageq_pg(pg);
 	}
 
 	/*
@@ -1228,9 +1230,9 @@ uvm_pagewire(struct vm_page *pg)
 	KASSERT(uvm_page_owner_locked_p(pg, TRUE));
 
 	if (pg->wire_count == 0) {
-		uvm_lock_pageq();
+		uvm_lock_pageq_pg(pg);
 		uvm_pagedequeue(pg);
-		uvm_unlock_pageq();
+		uvm_unlock_pageq_pg(pg);
 		atomic_inc_int(&uvmexp.wired);
 	}
 	KASSERT((pg->pg_flags & (PQ_INACTIVE|PQ_ACTIVE)) == 0);
@@ -1271,9 +1273,9 @@ uvm_pagedeactivate(struct vm_page *pg)
 		return;
 	}
 
-	uvm_lock_pageq();
+	uvm_lock_pageq_pg(pg);
 	if (pg->pg_flags & PQ_INACTIVE) {
-		uvm_unlock_pageq();
+		uvm_unlock_pageq_pg(pg);
 		return;
 	}
 
@@ -1281,10 +1283,10 @@ uvm_pagedeactivate(struct vm_page *pg)
 	pmap_page_protect(pg, PROT_NONE);
 
 	uvm_pagedequeue(pg);
-	TAILQ_INSERT_TAIL(&uvm.page_inactive, pg, pageq);
+	TAILQ_INSERT_TAIL(&uvm.pageqs[uvm_page_qidx(pg)].inactive, pg, pageq);
 	atomic_setbits_int(&pg->pg_flags, PQ_INACTIVE);
 	atomic_inc_int(&uvmexp.inactive);
-	uvm_unlock_pageq();
+	uvm_unlock_pageq_pg(pg);
 
 	pmap_clear_reference(pg);
 	/*
@@ -1321,12 +1323,12 @@ uvm_pageactivate(struct vm_page *pg)
 	if (pg->pg_flags & PQ_ACTIVE)
 		return;
 
-	uvm_lock_pageq();
+	uvm_lock_pageq_pg(pg);
 	uvm_pagedequeue(pg);
-	TAILQ_INSERT_TAIL(&uvm.page_active, pg, pageq);
+	TAILQ_INSERT_TAIL(&uvm.pageqs[uvm_page_qidx(pg)].active, pg, pageq);
 	atomic_setbits_int(&pg->pg_flags, PQ_ACTIVE);
 	atomic_inc_int(&uvmexp.active);
-	uvm_unlock_pageq();
+	uvm_unlock_pageq_pg(pg);
 }
 
 /*
@@ -1336,16 +1338,16 @@ void
 uvm_pagedequeue(struct vm_page *pg)
 {
 	KASSERT(uvm_page_owner_locked_p(pg, FALSE));
-	MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
+	MUTEX_ASSERT_LOCKED(&uvm.pageqs[uvm_page_qidx(pg)].lock);
 	KASSERT(pg->wire_count == 0);
 
 	if (pg->pg_flags & PQ_ACTIVE) {
-		TAILQ_REMOVE(&uvm.page_active, pg, pageq);
+		TAILQ_REMOVE(&uvm.pageqs[uvm_page_qidx(pg)].active, pg, pageq);
 		atomic_clearbits_int(&pg->pg_flags, PQ_ACTIVE);
 		atomic_dec_int(&uvmexp.active);
 	}
 	if (pg->pg_flags & PQ_INACTIVE) {
-		TAILQ_REMOVE(&uvm.page_inactive, pg, pageq);
+		TAILQ_REMOVE(&uvm.pageqs[uvm_page_qidx(pg)].inactive, pg, pageq);
 		atomic_clearbits_int(&pg->pg_flags, PQ_INACTIVE);
 		atomic_dec_int(&uvmexp.inactive);
 	}

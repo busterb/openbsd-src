@@ -622,8 +622,6 @@ uvn_flush(struct uvm_object *uobj, voff_t start, voff_t stop, int flags)
 	}
 
 	ppsp = NULL;		/* XXX: shut up gcc */
-	uvm_lock_pageq();
-	/* locked: both page queues */
 	for (curoff = start; curoff < stop; curoff += PAGE_SIZE) {
 		if ((pp = uvm_pagelookup(uobj, curoff)) == NULL)
 			continue;
@@ -663,24 +661,16 @@ uvn_flush(struct uvm_object *uobj, voff_t start, voff_t stop, int flags)
 		/* if we don't need a clean, deactivate/free pages then cont. */
 		if (!needs_clean) {
 			if (flags & PGO_DEACTIVATE) {
-				uvm_unlock_pageq();
 				uvm_pagedeactivate(pp);
-				uvm_lock_pageq();
 			} else if (flags & PGO_FREE) {
 				if (pp->pg_flags & PG_BUSY) {
-					uvm_unlock_pageq();
 					uvm_pagewait(pp, uobj->vmobjlock,
 					    "uvn_flsh");
 					rw_enter(uobj->vmobjlock, RW_WRITE);
-					uvm_lock_pageq();
 					curoff -= PAGE_SIZE;
 					continue;
 				} else {
 					pmap_page_protect(pp, PROT_NONE);
-					/* dequeue to prevent lock recursion */
-					if (pp->pg_flags &
-					    (PQ_ACTIVE|PQ_INACTIVE))
-						uvm_pagedequeue(pp);
 					uvm_pagefree(pp);
 				}
 			}
@@ -693,8 +683,7 @@ ReTry:
 		 * working on.  if it is !PG_CLEAN,!PG_BUSY and we asked
 		 * for cleaning (PGO_CLEANIT).  we clean it now.
 		 *
-		 * let uvm_pager_put attempted a clustered page out.
-		 * note: locked: page queues.
+		 * let uvm_pager_put attempt a clustered page out.
 		 */
 		atomic_setbits_int(&pp->pg_flags, PG_BUSY);
 		UVM_PAGE_OWN(pp, "uvn_flush");
@@ -702,8 +691,13 @@ ReTry:
 		ppsp = pps;
 		npages = sizeof(pps) / sizeof(struct vm_page *);
 
-		result = uvm_pager_put(uobj, pp, &ppsp, &npages,
-			   flags | PGO_DOACTCLUST, start, stop);
+		{
+			struct mutex *pp_lk = &uvm.pageqs[uvm_page_qidx(pp)].lock;
+			mtx_enter(pp_lk);
+			result = uvm_pager_put(uobj, pp, &ppsp, &npages,
+			    flags | PGO_DOACTCLUST, pp_lk, start, stop);
+			/* pp_lk released inside uvm_pager_put */
+		}
 
 		/*
 		 * if we did an async I/O it is remotely possible for the
@@ -712,7 +706,6 @@ ReTry:
 		 * we only touch it when it won't be freed, RELEASED took care
 		 * of the rest.
 		 */
-		uvm_lock_pageq();
 
 		/*
 		 * VM_PAGER_AGAIN: given the structure of this pager, this
@@ -773,9 +766,7 @@ ReTry:
 
 			/* dispose of page */
 			if (flags & PGO_DEACTIVATE) {
-				uvm_unlock_pageq();
 				uvm_pagedeactivate(ptmp);
-				uvm_lock_pageq();
 			} else if (flags & PGO_FREE &&
 			    result != VM_PAGER_PEND) {
 				if (result != VM_PAGER_OK) {
@@ -796,18 +787,12 @@ ReTry:
 					retval = FALSE;
 				}
 				pmap_page_protect(ptmp, PROT_NONE);
-				/* dequeue first to prevent lock recursion */
-				if (ptmp->pg_flags & (PQ_ACTIVE|PQ_INACTIVE))
-					uvm_pagedequeue(ptmp);
 				uvm_pagefree(ptmp);
 			}
 
 		}		/* end of "lcv" for loop */
 
 	}		/* end of "pp" for loop */
-
-	/* done with pagequeues: unlock */
-	uvm_unlock_pageq();
 
 	/* now wait for all I/O if required. */
 	if (need_iosync) {

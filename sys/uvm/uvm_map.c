@@ -3023,9 +3023,9 @@ uvm_page_printit(struct vm_page *pg, boolean_t full,
 			(*pr)("  >>> page not found in uvm_pmemrange <<<\n");
 		pgl = NULL;
 	} else if (pg->pg_flags & PQ_INACTIVE) {
-		pgl = &uvm.page_inactive;
+		pgl = &uvm.pageqs[uvm_page_qidx(pg)].inactive;
 	} else if (pg->pg_flags & PQ_ACTIVE) {
-		pgl = &uvm.page_active;
+		pgl = &uvm.pageqs[uvm_page_qidx(pg)].active;
 	} else {
 		pgl = NULL;
 	}
