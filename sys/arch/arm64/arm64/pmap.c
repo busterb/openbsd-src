@@ -1524,16 +1524,24 @@ pmap_deactivate(struct proc *p)
 		return;
 
 	/*
-	 * Flush this pmap's TLB entries on the local CPU before switching
-	 * away.  This ensures that after decrementing pm_active, no CPU
-	 * retains live TLB entries for this ASID without being reflected
-	 * in pm_active.  pmap_protect can then safely use a local-only
-	 * TLBI ASIDE1 instead of a broadcast TLBI ASIDE1IS whenever
-	 * pm_active == 1 (only the current CPU is active).
+	 * Flush this pmap's ASID entries on the local CPU before switching
+	 * away.  After decrementing pm_active, no CPU should retain live
+	 * TLB entries for this ASID without being counted in pm_active.
+	 * pmap_protect and ttlb_flush can then safely use a local-only
+	 * TLBI ASIDE1/VAE1 when pm_active == 1.
+	 *
+	 * Skip the flush for the kernel pmap: pmap_kernel() uses ASID 0,
+	 * which also covers trampoline and signal-return pages.  Flushing
+	 * ASID 0 on every kernel-thread context switch would evict those
+	 * entries and cause faults when user processes next need them.
+	 * The kernel pmap's TLB entries are managed separately (global
+	 * mappings via TTBR1; ASID-0 entries flushed during ASID rollover).
 	 */
-	cpu_tlb_flush_asid_all_local((uint64_t)pm->pm_asid << 48);
-	cpu_tlb_flush_asid_all_local(
-	    (uint64_t)(pm->pm_asid | ASID_USER) << 48);
+	if (pm != pmap_kernel()) {
+		cpu_tlb_flush_asid_all_local((uint64_t)pm->pm_asid << 48);
+		cpu_tlb_flush_asid_all_local(
+		    (uint64_t)(pm->pm_asid | ASID_USER) << 48);
+	}
 
 	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
 	__asm volatile("isb");
