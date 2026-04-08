@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+#
+# bspeedscope - convert btrace stack profiles to speedscope format
+#
+# Reads NDJSON from btrace -j output and writes a speedscope-format JSON
+# to stdout.  Each btrace interval (or group of intervals with --merge)
+# becomes a separate profile so you can review how the profile changed over
+# time.  A final accumulated profile totals all intervals.
+#
+# Usage:
+#   btrace -j script.bt | bspeedscope > profile.speedscope
+#   btrace -j kflamegraph.bt | bspeedscope --merge 10 > out.speedscope
+#   btrace -j kflamegraph.bt | bspeedscope --merge 10 --min-count 5 > out.speedscope
+#
+# Open the result at https://speedscope.app
+#
+# Options:
+#   --merge N      Combine every N intervals into one profile (default: 1).
+#                  Use when a long trace produces too many individual profiles.
+#   --min-count N  Drop stacks with fewer than N total samples in a profile
+#                  (default: 1).  Reduces file size for long traces.
+
+import json
+import sys
+import time
+
+
+def _parse_stack(key_str):
+    """
+    Parse a btrace kstack/ustack key into a list of frame names,
+    outermost (root-ward) first.
+
+    btrace formats each frame as '\\nfuncname+0xOFFSET'; the final frame
+    is '\\nkernel\\n' or '\\nuserland\\n'.  We strip offsets and reverse so
+    the outermost frame comes first (root at top of the icicle chart).
+    """
+    frames = []
+    for f in key_str.split('\n'):
+        f = f.strip()
+        if not f:
+            continue
+        plus = f.find('+')
+        if plus > 0:
+            f = f[:plus]
+        frames.append(f)
+    frames.reverse()
+    return frames
+
+
+def _make_profile(name, data, start_ms, end_ms, frame_index, frames, min_count):
+    """Build one speedscope sampled profile entry."""
+    samples = []
+    weights = []
+    for key_str, count in data.items():
+        count = int(count)
+        if count < min_count:
+            continue
+        parsed = _parse_stack(key_str)
+        if not parsed:
+            continue
+        indices = []
+        for fname in parsed:
+            if fname not in frame_index:
+                frame_index[fname] = len(frames)
+                frames.append({'name': fname})
+            indices.append(frame_index[fname])
+        samples.append(indices)
+        weights.append(count)
+
+    total = sum(weights)
+    # endValue must be > startValue; fall back to startValue + sample count.
+    if end_ms <= start_ms:
+        end_ms = start_ms + total
+
+    return {
+        'type': 'sampled',
+        'name': name,
+        'unit': 'milliseconds',
+        'startValue': start_ms,
+        'endValue': end_ms,
+        'samples': samples,
+        'weights': weights,
+    }
+
+
+def _ts_label(ts):
+    return time.strftime('%H:%M:%S', time.localtime(ts))
+
+
+def _to_speedscope(buckets, accumulated, min_count):
+    """
+    Build a speedscope JSON dict.
+
+    buckets     - list of {'label': str, 'start_ms': int, 'end_ms': int,
+                           'maps': {map_name: {stack_str: count}}}
+    accumulated - {map_name: {stack_str: total_count}}
+    """
+    frame_index = {}
+    frames = []
+    profiles = []
+
+    for b in buckets:
+        for map_name, data in sorted(b['maps'].items()):
+            if not data:
+                continue
+            pname = f'{map_name} [{b["label"]}]'
+            profiles.append(_make_profile(
+                pname, data,
+                b['start_ms'], b['end_ms'],
+                frame_index, frames, min_count))
+
+    acc_start = buckets[0]['start_ms'] if buckets else 0
+    acc_end   = buckets[-1]['end_ms']  if buckets else 0
+    for map_name, data in sorted(accumulated.items()):
+        if not data:
+            continue
+        profiles.append(_make_profile(
+            f'{map_name} [total]', data,
+            acc_start, acc_end,
+            frame_index, frames, 1))   # always include all in total
+
+    # Default to the first accumulated (total) profile.
+    n_interval = len(buckets) * len(accumulated)
+    active = max(0, n_interval)
+
+    return {
+        '$schema': 'https://www.speedscope.app/file-format-schema.json',
+        'shared': {'frames': frames},
+        'profiles': profiles,
+        'name': 'btrace profile',
+        'activeProfileIndex': active,
+        'exporter': 'bspeedscope',
+    }
+
+
+def main():
+    merge_n   = 1
+    min_count = 1
+
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == '--merge' and i + 1 < len(args):
+            merge_n = int(args[i + 1])
+            i += 2
+        elif args[i] == '--min-count' and i + 1 < len(args):
+            min_count = int(args[i + 1])
+            i += 2
+        elif args[i] in ('-h', '--help'):
+            print(__doc__)
+            sys.exit(0)
+        else:
+            print(f'bspeedscope: unknown option {args[i]}', file=sys.stderr)
+            sys.exit(1)
+
+    # intervals: ordered list of {'ts', 'maps': {name: {stack: count}}}
+    intervals   = []
+    accumulated = {}
+    cur_ts      = None
+    cur_maps    = None
+
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                print(line, file=sys.stderr)
+                continue
+
+            if obj.get('type') != 'map':
+                continue
+            data = obj.get('data', {})
+            if not data or not any('\n' in k for k in data):
+                continue
+
+            name = obj.get('name', '?')
+            ts   = obj.get('ts', 0)
+
+            # New timestamp signals a new btrace interval.
+            if ts != cur_ts:
+                cur_ts   = ts
+                cur_maps = {}
+                intervals.append({'ts': ts, 'maps': cur_maps})
+
+            bucket = cur_maps.setdefault(name, {})
+            for k, v in data.items():
+                bucket[k] = bucket.get(k, 0) + int(v)
+
+            acc = accumulated.setdefault(name, {})
+            for k, v in data.items():
+                acc[k] = acc.get(k, 0) + int(v)
+
+    except KeyboardInterrupt:
+        pass
+
+    if not accumulated:
+        print('bspeedscope: no stack data found', file=sys.stderr)
+        sys.exit(1)
+
+    # Group intervals into buckets of merge_n each.
+    buckets = []
+    for i in range(0, len(intervals), merge_n):
+        group = intervals[i:i + merge_n]
+        ts0   = group[0]['ts']
+        ts1   = group[-1]['ts']
+        # Try to use the next group's start as end_ms for clean boundaries.
+        next_start = intervals[i + merge_n]['ts'] if i + merge_n < len(intervals) else None
+
+        if merge_n == 1:
+            label = _ts_label(ts0)
+        else:
+            label = f'{_ts_label(ts0)}–{_ts_label(ts1)}'
+
+        # Merge maps across intervals in this group.
+        merged_maps = {}
+        for iv in group:
+            for map_name, data in iv['maps'].items():
+                m = merged_maps.setdefault(map_name, {})
+                for k, v in data.items():
+                    m[k] = m.get(k, 0) + v
+
+        start_ms = int(ts0 * 1000)
+        end_ms   = int((next_start or ts1) * 1000)
+        buckets.append({
+            'label':    label,
+            'start_ms': start_ms,
+            'end_ms':   end_ms,
+            'maps':     merged_maps,
+        })
+
+    json.dump(_to_speedscope(buckets, accumulated, min_count), sys.stdout,
+              separators=(',', ':'))
+    sys.stdout.write('\n')
+    sys.stdout.flush()
+
+
+if __name__ == '__main__':
+    main()
