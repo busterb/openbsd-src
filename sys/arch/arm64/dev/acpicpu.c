@@ -47,6 +47,7 @@ struct acpicpu_softc {
 	struct acpi_gas	sc_desired_perf;
 
 	uint64_t	sc_perf;
+	uint64_t	sc_cur_perf;
 };
 
 int	acpicpu_match(struct device *, void *, void *);
@@ -215,11 +216,14 @@ acpicpu_do_setperf(void *arg)
 		if (sc == NULL || sc->sc_nominal_perf == 0)
 			continue;
 
+		if (sc->sc_perf == sc->sc_cur_perf)
+			continue;
 		acpi_gasio(sc->sc_acpi, ACPI_IOWRITE,
 		    sc->sc_desired_perf.address_space_id,
 		    sc->sc_desired_perf.address,
 		    (1 << (sc->sc_desired_perf.access_size - 1)),
 		    sc->sc_desired_perf.register_bit_width / 8, &sc->sc_perf);
+		sc->sc_cur_perf = sc->sc_perf;
 	}
 }
 
