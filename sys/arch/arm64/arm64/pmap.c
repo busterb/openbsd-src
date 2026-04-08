@@ -48,12 +48,18 @@ ttlb_flush(pmap_t pm, vaddr_t va)
 	resva = ((va >> PAGE_SHIFT) & ((1ULL << 44) - 1));
 	if (pm == pmap_kernel()) {
 		cpu_tlb_flush_all_asid(resva);
-	} else if (pm->pm_active == 1) {
+	} else if (pm->pm_active == 1 && curcpu()->ci_curpm == pm) {
 		/*
-		 * Only this CPU has the pmap active.  pmap_deactivate
-		 * flushes all ASID entries on exit, so no other CPU
-		 * retains stale entries.  Use local-only VAE1 to avoid
-		 * the inner-shareable broadcast stall.
+		 * Only this CPU has the pmap active, and we are currently
+		 * running under it.  pmap_deactivate flushes the full ASID
+		 * on exit, so no other CPU retains stale entries for this
+		 * pmap.  Use local-only VAE1 to avoid the broadcast stall.
+		 *
+		 * The curcpu()->ci_curpm check is required: ttlb_flush is
+		 * also called from pdaemon/UVM paths that operate on pmaps
+		 * belonging to other CPUs (e.g. pmap_page_protect).  In
+		 * those cases pm_active == 1 but the active CPU is not us,
+		 * so a local flush would miss the live entry on that CPU.
 		 */
 		resva |= (uint64_t)pm->pm_asid << 48;
 		cpu_tlb_flush_asid_local(resva);
