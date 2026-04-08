@@ -1710,20 +1710,28 @@ pmap_protect(pmap_t pm, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 			}
 		} else {
 			/*
-			 * User pmap: update all PTEs first, then issue
-			 * two ASID-wide flushes (aside1is) instead of
-			 * one broadcast per page.  Reduces TLB shootdown
-			 * stalls from O(pages) to O(1) per mprotect call.
+			 * User pmap: update all PTEs first, then flush.
+			 * If only one CPU has this pmap loaded (pm_active==1,
+			 * the common case for single-threaded processes), use
+			 * local-only aside1 to avoid a broadcast stall across
+			 * all CPUs.  Multi-threaded pmaps still use aside1is.
 			 */
 			while (sva < eva) {
 				pmap_page_ro_noflush(pm, sva, prot);
 				sva += PAGE_SIZE;
 			}
 			if (pm->pm_active) {
-				cpu_tlb_flush_asid_all(
-				    (uint64_t)pm->pm_asid << 48);
-				cpu_tlb_flush_asid_all(
-				    (uint64_t)(pm->pm_asid | ASID_USER) << 48);
+				if (pm->pm_active == 1) {
+					cpu_tlb_flush_asid_all_local(
+					    (uint64_t)pm->pm_asid << 48);
+					cpu_tlb_flush_asid_all_local(
+					    (uint64_t)(pm->pm_asid | ASID_USER) << 48);
+				} else {
+					cpu_tlb_flush_asid_all(
+					    (uint64_t)pm->pm_asid << 48);
+					cpu_tlb_flush_asid_all(
+					    (uint64_t)(pm->pm_asid | ASID_USER) << 48);
+				}
 			}
 		}
 		pmap_unlock(pm);

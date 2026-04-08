@@ -134,6 +134,22 @@ ENTRY(cpu_tlb_flush_asid_all)
 END(cpu_tlb_flush_asid_all)
 
 /*
+ * cpu_tlb_flush_asid_all_local: flush all TLB entries for an ASID on the
+ * local CPU only.  Uses non-shareable barriers (dsb nsh) instead of
+ * inner-shareable (dsb ish), avoiding the broadcast stall to all CPUs.
+ * Safe only when no other CPU has this pmap loaded (pm_active == 1).
+ */
+ENTRY(cpu_tlb_flush_asid_all_local)
+	RETGUARD_SETUP(cpu_tlb_flush_asid_all_local, x15)
+	dsb	nshst
+	tlbi	aside1, x0
+	dsb	nsh
+	isb
+	RETGUARD_CHECK(cpu_tlb_flush_asid_all_local, x15)
+	ret
+END(cpu_tlb_flush_asid_all_local)
+
+/*
  * void cpu_dcache_wb_range(vaddr_t, vsize_t)
  */
 ENTRY(cpu_dcache_wb_range)
