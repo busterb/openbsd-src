@@ -472,7 +472,7 @@ uvm_mk_pcluster(struct uvm_object *uobj, struct vm_page **pps, int *npages,
 int
 uvm_pager_put(struct uvm_object *uobj, struct vm_page *pg,
     struct vm_page ***ppsp_ptr, int *npages, int flags,
-    voff_t start, voff_t stop)
+    struct mutex *lk, voff_t start, voff_t stop)
 {
 	int result;
 	struct vm_page **ppsp = *ppsp_ptr;
@@ -496,7 +496,7 @@ uvm_pager_put(struct uvm_object *uobj, struct vm_page *pg,
 	}
 
 	/* now that we've clustered we can unlock the page queues */
-	uvm_unlock_pageq();
+	mtx_leave(lk);
 
 	/*
 	 * now attempt the I/O.   if we have a failure and we are

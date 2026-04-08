@@ -88,7 +88,7 @@
  * Locks used to protect struct members in this file:
  *	I	immutable after creation
  *	a	atomic operations
- *	Q	uvm.pageqlock
+ *	Q	uvm.pageqs[uvm_page_qidx(pg)].lock
  *	F	uvm.fpageqlock
  *	o	owner lock (uobject->vmobjlock or uanon->an_lock)
  */
@@ -282,8 +282,15 @@ int		vm_physseg_find(paddr_t, int *);
  * macros
  */
 
-#define uvm_lock_pageq()	mtx_enter(&uvm.pageqlock)
-#define uvm_unlock_pageq()	mtx_leave(&uvm.pageqlock)
+/*
+ * Map a page to its page-queue shard index based on physical frame number.
+ * UVM_NUM_PAGEQ must be a power of 2.
+ */
+#define uvm_page_qidx(pg) \
+	((int)(VM_PAGE_TO_PHYS(pg) >> PAGE_SHIFT) & (UVM_NUM_PAGEQ - 1))
+
+#define uvm_lock_pageq_pg(pg)	mtx_enter(&uvm.pageqs[uvm_page_qidx(pg)].lock)
+#define uvm_unlock_pageq_pg(pg)	mtx_leave(&uvm.pageqs[uvm_page_qidx(pg)].lock)
 #define uvm_lock_fpageq()	mtx_enter(&uvm.fpageqlock)
 #define uvm_unlock_fpageq()	mtx_leave(&uvm.fpageqlock)
 
