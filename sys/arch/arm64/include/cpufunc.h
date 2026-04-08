@@ -42,6 +42,7 @@ extern int64_t dczva_line_size;
 void cpu_setttb(int, paddr_t);
 void cpu_tlb_flush(void);
 void cpu_tlb_flush_asid(vaddr_t);
+void cpu_tlb_flush_asid_local(vaddr_t);
 void cpu_tlb_flush_all_asid(vaddr_t);
 void cpu_tlb_flush_asid_all(vaddr_t);
 void cpu_tlb_flush_asid_all_local(vaddr_t);

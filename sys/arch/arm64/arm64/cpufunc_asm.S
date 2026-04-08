@@ -113,6 +113,16 @@ ENTRY(cpu_tlb_flush_asid)
 	ret
 END(cpu_tlb_flush_asid)
 
+ENTRY(cpu_tlb_flush_asid_local)
+	RETGUARD_SETUP(cpu_tlb_flush_asid_local, x15)
+	dsb	ishst
+	tlbi	vae1, x0
+	dsb	ish
+	isb
+	RETGUARD_CHECK(cpu_tlb_flush_asid_local, x15)
+	ret
+END(cpu_tlb_flush_asid_local)
+
 ENTRY(cpu_tlb_flush_all_asid)
 	RETGUARD_SETUP(cpu_tlb_flush_all_asid, x15)
 	dsb	ishst

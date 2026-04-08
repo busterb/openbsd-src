@@ -48,6 +48,17 @@ ttlb_flush(pmap_t pm, vaddr_t va)
 	resva = ((va >> PAGE_SHIFT) & ((1ULL << 44) - 1));
 	if (pm == pmap_kernel()) {
 		cpu_tlb_flush_all_asid(resva);
+	} else if (pm->pm_active == 1) {
+		/*
+		 * Only this CPU has the pmap active.  pmap_deactivate
+		 * flushes all ASID entries on exit, so no other CPU
+		 * retains stale entries.  Use local-only VAE1 to avoid
+		 * the inner-shareable broadcast stall.
+		 */
+		resva |= (uint64_t)pm->pm_asid << 48;
+		cpu_tlb_flush_asid_local(resva);
+		resva |= (uint64_t)ASID_USER << 48;
+		cpu_tlb_flush_asid_local(resva);
 	} else {
 		resva |= (uint64_t)pm->pm_asid << 48;
 		cpu_tlb_flush_asid(resva);
