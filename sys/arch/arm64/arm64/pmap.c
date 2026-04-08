@@ -1559,6 +1559,38 @@ pmap_extract(pmap_t pm, vaddr_t va, paddr_t *pap)
 	return 1;
 }
 
+/*
+ * pmap_page_ro_noflush: update PTE permissions without issuing a TLB
+ * flush.  Callers that modify a range of pages in one pmap can batch
+ * the required flush with cpu_tlb_flush_asid_all() after the loop
+ * instead of broadcasting one tlbi per page.  Only safe for user pmaps;
+ * the kernel pmap requires per-VA invalidation (vaale1is) because it
+ * has no ASID of its own.
+ */
+static void
+pmap_page_ro_noflush(pmap_t pm, vaddr_t va, vm_prot_t prot)
+{
+	struct pte_desc *pted;
+	uint64_t *pl3;
+
+	/* Every VA needs a pted, even unmanaged ones. */
+	pted = pmap_vp_lookup(pm, va, &pl3);
+	if (!pted || !PTED_VALID(pted))
+		return;
+
+	pted->pted_va &= ~PROT_WRITE;
+	pted->pted_pte &= ~PROT_WRITE;
+	if ((prot & PROT_READ) == 0) {
+		pted->pted_va &= ~PROT_READ;
+		pted->pted_pte &= ~PROT_READ;
+	}
+	if ((prot & PROT_EXEC) == 0) {
+		pted->pted_va &= ~PROT_EXEC;
+		pted->pted_pte &= ~PROT_EXEC;
+	}
+	pmap_pte_update(pted, pl3);
+}
+
 void
 pmap_page_ro(pmap_t pm, vaddr_t va, vm_prot_t prot)
 {
@@ -1667,9 +1699,32 @@ pmap_protect(pmap_t pm, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 {
 	if (prot & (PROT_READ | PROT_EXEC)) {
 		pmap_lock(pm);
-		while (sva < eva) {
-			pmap_page_ro(pm, sva, prot);
-			sva += PAGE_SIZE;
+		if (pm == pmap_kernel()) {
+			/*
+			 * Kernel pmap has no ASID; must flush per-VA
+			 * using vaale1is (cpu_tlb_flush_all_asid).
+			 */
+			while (sva < eva) {
+				pmap_page_ro(pm, sva, prot);
+				sva += PAGE_SIZE;
+			}
+		} else {
+			/*
+			 * User pmap: update all PTEs first, then issue
+			 * two ASID-wide flushes (aside1is) instead of
+			 * one broadcast per page.  Reduces TLB shootdown
+			 * stalls from O(pages) to O(1) per mprotect call.
+			 */
+			while (sva < eva) {
+				pmap_page_ro_noflush(pm, sva, prot);
+				sva += PAGE_SIZE;
+			}
+			if (pm->pm_active) {
+				cpu_tlb_flush_asid_all(
+				    (uint64_t)pm->pm_asid << 48);
+				cpu_tlb_flush_asid_all(
+				    (uint64_t)(pm->pm_asid | ASID_USER) << 48);
+			}
 		}
 		pmap_unlock(pm);
 		return;
