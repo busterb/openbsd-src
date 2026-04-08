@@ -1309,6 +1309,18 @@ uvm_pageactivate(struct vm_page *pg)
 		return;
 	}
 
+	/*
+	 * Skip pageqlock acquisition for already-active pages.  The common
+	 * case on a parallel workload is faulting the same page repeatedly;
+	 * acquiring the global pageqlock to move it to the tail of the active
+	 * list serialises all CPUs for no reclaim benefit.  The page stays at
+	 * its current position in the active list rather than being refreshed
+	 * to the tail, which is a minor LRU ordering trade-off acceptable
+	 * when there is no reclaim pressure.
+	 */
+	if (pg->pg_flags & PQ_ACTIVE)
+		return;
+
 	uvm_lock_pageq();
 	uvm_pagedequeue(pg);
 	TAILQ_INSERT_TAIL(&uvm.page_active, pg, pageq);
