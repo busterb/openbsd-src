@@ -92,6 +92,50 @@ def _make_profile(name, data, start_ms, end_ms, frame_index, frames, min_count):
     }
 
 
+def _split_compound_key(key):
+    """
+    Split a btrace compound map key into (label, stack_str).
+
+    When btrace aggregates with multiple keys, e.g. @[cpu, kstack], it
+    formats the map key as ba2hash() does: components joined by ', '.
+    Because kstack strings always start with '\\n', the boundary between
+    the non-stack prefix and the stack is the last occurrence of ', \\n'.
+
+    Returns (label, stack_str) on success, or (None, key) if the key
+    does not contain a stack component.
+
+    Examples:
+      "0, \\nfunc+0x10\\nkernel\\n"        -> ("0",       "\\nfunc+0x10\\nkernel\\n")
+      "0, nginx, \\nfunc+0x10\\nkernel\\n" -> ("0, nginx","\\nfunc+0x10\\nkernel\\n")
+      "\\nfunc+0x10\\nkernel\\n"            -> (None, key)   plain stack, no label
+    """
+    idx = key.rfind(', \n')
+    if idx <= 0:
+        return None, key
+    return key[:idx], key[idx + 2:]
+
+
+def _maphist_to_stacks(data):
+    """
+    Convert maphist data {stack_str: {bucket: count}} to {stack_str: count}
+    by summing all histogram bucket counts per stack.  Skips outer keys that
+    are not stack traces (i.e. do not contain '\\n').
+
+    This handles scripts like:
+        @[kstack] = hist(latency_ns);
+    where the outer keys are call stacks and the histogram represents a
+    distribution of measured values per stack.
+    """
+    result = {}
+    for key, buckets in data.items():
+        if '\n' not in key:
+            continue
+        total = sum(int(v) for v in buckets.values())
+        if total > 0:
+            result[key] = total
+    return result
+
+
 def _ts_label(ts):
     return time.strftime('%H:%M:%S', time.localtime(ts))
 
@@ -179,14 +223,23 @@ def main():
                 print(line, file=sys.stderr)
                 continue
 
-            if obj.get('type') != 'map':
-                continue
-            data = obj.get('data', {})
-            if not data or not any('\n' in k for k in data):
-                continue
-
+            t    = obj.get('type')
             name = obj.get('name', '?')
             ts   = obj.get('ts', 0)
+            raw  = obj.get('data', {})
+
+            if t == 'map':
+                # map: {stack_str: count} — only if keys are stack traces
+                if not raw or not any('\n' in k for k in raw):
+                    continue
+                data = {k: int(v) for k, v in raw.items()}
+            elif t == 'maphist':
+                # maphist: {stack_str: {bucket: count}} — outer keys are stacks
+                data = _maphist_to_stacks(raw)
+                if not data:
+                    continue
+            else:
+                continue
 
             # New timestamp signals a new btrace interval.
             if ts != cur_ts:
@@ -194,13 +247,35 @@ def main():
                 cur_maps = {}
                 intervals.append({'ts': ts, 'maps': cur_maps})
 
-            bucket = cur_maps.setdefault(name, {})
-            for k, v in data.items():
-                bucket[k] = bucket.get(k, 0) + int(v)
+            # Check whether keys are compound ("label, \nframes...").
+            # If so, split into per-label sub-maps so each label becomes
+            # its own speedscope profile (e.g. one profile per CPU).
+            sample_key = next(iter(data))
+            label, _ = _split_compound_key(sample_key)
 
-            acc = accumulated.setdefault(name, {})
-            for k, v in data.items():
-                acc[k] = acc.get(k, 0) + int(v)
+            if label is not None:
+                labeled = {}
+                for k, v in data.items():
+                    lbl, stk = _split_compound_key(k)
+                    if lbl is None:
+                        lbl = ''
+                    sub = labeled.setdefault(lbl, {})
+                    sub[stk] = sub.get(stk, 0) + v
+                for lbl, sub in labeled.items():
+                    sname = f'{name}[{lbl}]'
+                    bucket = cur_maps.setdefault(sname, {})
+                    for k, v in sub.items():
+                        bucket[k] = bucket.get(k, 0) + v
+                    acc = accumulated.setdefault(sname, {})
+                    for k, v in sub.items():
+                        acc[k] = acc.get(k, 0) + v
+            else:
+                bucket = cur_maps.setdefault(name, {})
+                for k, v in data.items():
+                    bucket[k] = bucket.get(k, 0) + v
+                acc = accumulated.setdefault(name, {})
+                for k, v in data.items():
+                    acc[k] = acc.get(k, 0) + v
 
     except KeyboardInterrupt:
         pass
