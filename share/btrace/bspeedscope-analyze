@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+#
+# bspeedscope-analyze - summarize hotspots from a bspeedscope profile
+#
+# Usage:
+#   bspeedscope-analyze profile.speedscope
+#   bspeedscope-analyze profile.speedscope --top 30
+#
+# Prints:
+#   1. Aggregate inclusive % across all profiles
+#   2. Per-profile summary: idle%, tlb_flush_asid%, uvm_map_protect%
+
+import json
+import sys
+
+
+def load(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def top_frames(profiles, frames, n=25):
+    """Return top n frames by inclusive sample count across all profiles."""
+    total_samples = sum(sum(p['weights']) for p in profiles)
+    counts = {}
+    for prof in profiles:
+        for sample, weight in zip(prof['samples'], prof['weights']):
+            for idx in sample:
+                counts[idx] = counts.get(idx, 0) + weight
+    ranked = sorted(counts.items(), key=lambda x: -x[1])[:n]
+    return total_samples, [(frames[i], cnt) for i, cnt in ranked]
+
+
+def per_profile_summary(profiles, frames):
+    """Return per-profile metrics: idle%, interesting function %s."""
+    rows = []
+    for prof in sorted(profiles, key=lambda p: p['name']):
+        total = sum(prof['weights'])
+        if not total:
+            continue
+        counts = {}
+        for sample, weight in zip(prof['samples'], prof['weights']):
+            for idx in sample:
+                counts[idx] = counts.get(idx, 0) + weight
+
+        def pct(fn_substr):
+            v = sum(v for i, v in counts.items()
+                    if fn_substr in frames[i])
+            return v * 100 / total
+
+        rows.append({
+            'name':            prof['name'],
+            'total':           total,
+            'idle':            pct('idle') + pct('trampoline'),
+            'tlb_flush_asid':  pct('tlb_flush_asid'),
+            'uvm_map_protect': pct('uvm_map_protect'),
+            'uvm_fault':       pct('uvm_fault'),
+            'exit1':           pct('exit1'),
+            'mtx_enter':       pct('mtx_enter'),
+        })
+    return rows
+
+
+def main():
+    top_n = 25
+    paths = []
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == '--top' and i + 1 < len(args):
+            top_n = int(args[i + 1])
+            i += 2
+        elif args[i] in ('-h', '--help'):
+            print(__doc__)
+            sys.exit(0)
+        else:
+            paths.append(args[i])
+            i += 1
+
+    if not paths:
+        print('usage: bspeedscope-analyze profile.speedscope [--top N]',
+              file=sys.stderr)
+        sys.exit(1)
+
+    for path in paths:
+        d = load(path)
+        frames = {i: fr['name'] for i, fr in enumerate(d['shared']['frames'])}
+        profiles = d['profiles']
+
+        print(f'=== {path} ===')
+        total_samples, ranked = top_frames(profiles, frames, top_n)
+        print(f'\nTop {top_n} inclusive frames across all profiles '
+              f'(total samples={total_samples}):')
+        for name, cnt in ranked:
+            pct = cnt * 100 / total_samples
+            print(f'  {pct:5.1f}%  {name}')
+
+        print(f'\nPer-profile summary:')
+        hdr = f'  {"profile":<20}  {"samples":>8}  {"idle":>6}  '
+        hdr += f'{"tlb_asid":>8}  {"map_prot":>8}  '
+        hdr += f'{"uvm_fault":>9}  {"exit1":>6}  {"mtx":>6}'
+        print(hdr)
+        print('  ' + '-' * (len(hdr) - 2))
+        for row in per_profile_summary(profiles, frames):
+            print(f'  {row["name"][:20]:<20}  {row["total"]:>8d}'
+                  f'  {row["idle"]:>5.1f}%'
+                  f'  {row["tlb_flush_asid"]:>7.1f}%'
+                  f'  {row["uvm_map_protect"]:>7.1f}%'
+                  f'  {row["uvm_fault"]:>8.1f}%'
+                  f'  {row["exit1"]:>5.1f}%'
+                  f'  {row["mtx_enter"]:>5.1f}%')
+        print()
+
+
+if __name__ == '__main__':
+    main()

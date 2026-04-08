@@ -3,7 +3,7 @@
 FILES=	ifaddrref.bt kalloc.bt kcpuflamegraph.bt kfunctime.bt kprofile.bt \
 	netlock.bt opencount.bt runqlat.bt solock.bt syscalllat.bt \
 	syscount.bt uprofile.bt uvmcount.bt
-SCRIPTS=	bviz bspeedscope
+SCRIPTS=	bviz bspeedscope bspeedscope-analyze
 NOOBJ=	noobj
 
 install:
