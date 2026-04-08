@@ -46,17 +46,31 @@
  * of reference...)
  *
  *  Locks used to protect struct members in this file:
- *	Q	uvm.pageqlock
+ *	Q	uvm.pageqs[i].lock  (page's shard, see uvm_page_qidx())
  *	F	uvm.fpageqlock
  */
+
+/*
+ * Number of page queue shards.  Each shard has its own lock and its own
+ * active/inactive lists.  A page's shard is determined by its physical
+ * frame number modulo UVM_NUM_PAGEQ (a power of 2 for fast masking).
+ * Increasing this reduces lock contention from parallel page faults at
+ * the cost of more complex pdaemon iteration.
+ */
+#define UVM_NUM_PAGEQ	8
+
+struct uvm_pageq {
+	struct mutex	lock;		/* protects active and inactive lists */
+	struct pglist	active;		/* allocated pages, in use */
+	struct pglist	inactive;	/* pages inactive (reclaim/free) */
+};
+
 struct uvm {
 	/* vm_page related parameters */
 
-	/* vm_page queues */
-	struct pglist page_active;	/* [Q] allocated pages, in use */
-	struct pglist page_inactive;	/* [Q] pages inactive (reclaim/free) */
-	/* Lock order: pageqlock, then fpageqlock. */
-	struct mutex pageqlock;		/* [] lock for active/inactive page q */
+	/* vm_page queues — sharded to reduce fault-path lock contention */
+	struct uvm_pageq pageqs[UVM_NUM_PAGEQ];	/* [Q] per-shard page queues */
+	/* Lock order: pageqs[i].lock, then fpageqlock. */
 	struct mutex fpageqlock;	/* [] lock for free page q  + pdaemon */
 	boolean_t page_init_done;	/* TRUE if uvm_page_init() finished */
 	struct uvm_pmr_control pmr_control; /* [F] pmemrange data */

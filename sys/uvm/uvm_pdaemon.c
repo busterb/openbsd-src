@@ -103,8 +103,8 @@ extern unsigned long drmbackoff(long);
  */
 
 struct rwlock	*uvmpd_trylockowner(struct vm_page *);
-void		uvmpd_scan(int, int);
-int		uvmpd_scan_inactive(int);
+void		uvmpd_scan(int, int, int);
+int		uvmpd_scan_inactive(int, int);
 void		uvmpd_tune(void);
 void		uvmpd_drop(struct pglist *);
 int		uvmpd_dropswap(struct vm_page *);
@@ -232,9 +232,10 @@ uvm_pageout(void *arg)
 		uvm_unlock_fpageq();
 
 		/*
-		 * now lock page queues and recompute inactive count
+		 * Recompute inactive target from global atomic counters.
+		 * No page queue lock needed — uvmexp.active/inactive are
+		 * maintained with atomic operations.
 		 */
-		uvm_lock_pageq();
 		atomic_store_int(&uvmexp.inactarg,
 		    (atomic_load_sint(&uvmexp.active) +
 		    atomic_load_sint(&uvmexp.inactive)) / 3);
@@ -244,7 +245,6 @@ uvm_pageout(void *arg)
 		inactive_shortage =
 		    atomic_load_sint(&uvmexp.inactarg) -
 		    atomic_load_sint(&uvmexp.inactive) - BUFPAGES_INACT;
-		uvm_unlock_pageq();
 
 		/* Reclaim pages from the buffer cache if possible. */
 		if (shortage > 0)
@@ -260,8 +260,16 @@ uvm_pageout(void *arg)
 
 		shortage = MAX(shortage, size);
 
-		uvm_lock_pageq();
-		uvmpd_scan(shortage, inactive_shortage);
+		/*
+		 * iterate each page queue shard in turn.
+		 * Each shard's lock is taken, held for its scan, and released
+		 * before moving to the next shard.
+		 */
+		for (int qi = 0; qi < UVM_NUM_PAGEQ; qi++) {
+			mtx_enter(&uvm.pageqs[qi].lock);
+			uvmpd_scan(shortage, inactive_shortage, qi);
+			/* lock released inside uvmpd_scan */
+		}
 
 		/*
 		 * if there's any free memory to be had,
@@ -272,11 +280,6 @@ uvm_pageout(void *arg)
 		    atomic_load_sint(&uvmexp.paging) == 0)
 			wakeup(&uvmexp.free);
 		uvm_unlock_fpageq();
-
-		/*
-		 * scan done.  unlock page queues (the only lock we are holding)
-		 */
-		uvm_unlock_pageq();
 
 		sched_pause(yield);
 	}
@@ -492,11 +495,12 @@ uvmpd_dropswap(struct vm_page *pg)
 }
 
 struct vm_page *
-uvmpd_iterator(struct pglist *pglst, struct vm_page *p, struct vm_page *iter)
+uvmpd_iterator(struct pglist *pglst, struct vm_page *p, struct vm_page *iter,
+    struct mutex *lk)
 {
 	struct vm_page *nextpg = NULL;
 
-	MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
+	MUTEX_ASSERT_LOCKED(lk);
 
 	/* p is null to signal final swap i/o. */
 	if (p == NULL)
@@ -524,9 +528,10 @@ uvmpd_iterator(struct pglist *pglst, struct vm_page *p, struct vm_page *iter)
  * => we return TRUE if we are exiting because we met our target
  */
 int
-uvmpd_scan_inactive(int shortage)
+uvmpd_scan_inactive(int shortage, int qi)
 {
-	struct pglist *pglst = &uvm.page_inactive;
+	struct mutex *lk = &uvm.pageqs[qi].lock;
+	struct pglist *pglst = &uvm.pageqs[qi].inactive;
 	int result, freed = 0;
 	struct vm_page *p, iter = { .pg_flags = PQ_ITER };
 	struct uvm_object *uobj;
@@ -552,7 +557,7 @@ uvmpd_scan_inactive(int shortage)
 
 	/* Insert iterator. */
 	TAILQ_INSERT_AFTER(pglst, p, &iter, pageq);
-	for (; p != NULL; p = uvmpd_iterator(pglst, p, &iter)) {
+	for (; p != NULL; p = uvmpd_iterator(pglst, p, &iter, lk)) {
 		/*
 		 * see if we've met our target
 		 */
@@ -587,10 +592,10 @@ uvmpd_scan_inactive(int shortage)
 		 * and skip to next page.
 		 */
 		if (pmap_is_referenced(p)) {
-			uvm_unlock_pageq();
+			mtx_leave(lk);
 			uvm_pageactivate(p);
 			rw_exit(slock);
-			uvm_lock_pageq();
+			mtx_enter(lk);
 			atomic_inc_int(&uvmexp.pdreact);
 			continue;
 		}
@@ -671,10 +676,10 @@ uvmpd_scan_inactive(int shortage)
 		 */
 		if ((p->pg_flags & PQ_SWAPBACKED) && uvm_swapisfull()) {
 			dirtyreacts++;
-			uvm_unlock_pageq();
+			mtx_leave(lk);
 			uvm_pageactivate(p);
 			rw_exit(slock);
-			uvm_lock_pageq();
+			mtx_enter(lk);
 			continue;
 		}
 
@@ -718,10 +723,10 @@ uvmpd_scan_inactive(int shortage)
 				atomic_clearbits_int(&p->pg_flags, PG_BUSY);
 				UVM_PAGE_OWN(p, NULL);
 				dirtyreacts++;
-				uvm_unlock_pageq();
+				mtx_leave(lk);
 				uvm_pageactivate(p);
 				rw_exit(slock);
-				uvm_lock_pageq();
+				mtx_enter(lk);
 				continue;
 			}
 
@@ -730,10 +735,10 @@ uvmpd_scan_inactive(int shortage)
 				atomic_clearbits_int(&p->pg_flags, PG_BUSY);
 				UVM_PAGE_OWN(p, NULL);
 				dirtyreacts++;
-				uvm_unlock_pageq();
+				mtx_leave(lk);
 				uvm_pageactivate(p);
 				rw_exit(slock);
-				uvm_lock_pageq();
+				mtx_enter(lk);
 				continue;
 			}
 			rw_exit(slock);
@@ -753,7 +758,7 @@ uvmpd_scan_inactive(int shortage)
 		 */
 		atomic_inc_int(&uvmexp.pdpageouts);
 		if (swap_backed) {
-			uvm_unlock_pageq();
+			mtx_leave(lk);
 			/* starting I/O now... set up for it */
 			npages = swc.swc_nused;
 			result = swapcluster_flush(&swc);
@@ -773,11 +778,11 @@ uvmpd_scan_inactive(int shortage)
 			 * cluster pages at this level.
 			 */
 			result = uvm_pager_put(uobj, p, &ppsp, &npages,
-			    PGO_ALLPAGES|PGO_PDFREECLUST, 0, 0);
+			    PGO_ALLPAGES|PGO_PDFREECLUST, lk, 0, 0);
 			rw_exit(slock);
 		}
 
-		uvm_lock_pageq();
+		mtx_enter(lk);
 		if (result == VM_PAGER_PEND) {
 			atomic_add_int(&uvmexp.paging, npages);
 			atomic_inc_int(&uvmexp.pdpending);
@@ -787,10 +792,10 @@ uvmpd_scan_inactive(int shortage)
 
 	/* final swap-backed clustered pageout */
 	if (swc.swc_slot > 0) {
-		uvm_unlock_pageq();
+		mtx_leave(lk);
 		npages = swc.swc_nused;
 		result = swapcluster_flush(&swc);
-		uvm_lock_pageq();
+		mtx_enter(lk);
 		if (result == VM_PAGER_PEND) {
 			atomic_add_int(&uvmexp.paging, npages);
 			atomic_inc_int(&uvmexp.pdpending);
@@ -807,14 +812,15 @@ uvmpd_scan_inactive(int shortage)
  */
 
 void
-uvmpd_scan(int shortage, int inactive_shortage)
+uvmpd_scan(int shortage, int inactive_shortage, int qi)
 {
 	int swap_shortage, pages_freed;
-	struct pglist *pglst = &uvm.page_active;
+	struct mutex *lk = &uvm.pageqs[qi].lock;
+	struct pglist *pglst = &uvm.pageqs[qi].active;
 	struct vm_page *p, iter = { .pg_flags = PQ_ITER };
 	struct rwlock *slock;
 
-	MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
+	MUTEX_ASSERT_LOCKED(lk);
 
 	atomic_inc_int(&uvmexp.pdrevs);		/* counter */
 
@@ -824,7 +830,7 @@ uvmpd_scan(int shortage, int inactive_shortage)
 	 * we work on meeting our inactive target by converting active pages
 	 * to inactive ones.
 	 */
-	pages_freed = uvmpd_scan_inactive(shortage);
+	pages_freed = uvmpd_scan_inactive(shortage, qi);
 	atomic_add_int(&uvmexp.pdfreed, pages_freed);
 	shortage -= pages_freed;
 
@@ -841,13 +847,15 @@ uvmpd_scan(int shortage, int inactive_shortage)
 		swap_shortage = shortage;
 	}
 
-	if ((p = TAILQ_FIRST(pglst)) == NULL)
-	    return;
+	if ((p = TAILQ_FIRST(pglst)) == NULL) {
+		mtx_leave(lk);
+		return;
+	}
 
 	/* Insert iterator. */
 	TAILQ_INSERT_AFTER(pglst, p, &iter, pageq);
 	for (; p != NULL && (inactive_shortage > 0 || swap_shortage > 0);
-	     p = uvmpd_iterator(pglst, p, &iter)) {
+	     p = uvmpd_iterator(pglst, p, &iter, lk)) {
 		if (p->pg_flags & PG_BUSY) {
 			continue;
 		}
@@ -884,9 +892,9 @@ uvmpd_scan(int shortage, int inactive_shortage)
 		 * inactive pages.
 		 */
 		if (inactive_shortage > 0) {
-			uvm_unlock_pageq();
+			mtx_leave(lk);
 			uvm_pagedeactivate(p);
-			uvm_lock_pageq();
+			mtx_enter(lk);
 			atomic_inc_int(&uvmexp.pddeact);
 			inactive_shortage--;
 		}
@@ -897,6 +905,7 @@ uvmpd_scan(int shortage, int inactive_shortage)
 		rw_exit(slock);
 	}
 	TAILQ_REMOVE(pglst, &iter, pageq);
+	mtx_leave(lk);
 }
 
 #ifdef HIBERNATE
@@ -945,8 +954,12 @@ uvmpd_drop(struct pglist *pglst)
 void
 uvmpd_hibernate(void)
 {
-	uvmpd_drop(&uvm.page_inactive);
-	uvmpd_drop(&uvm.page_active);
+	int qi;
+
+	for (qi = 0; qi < UVM_NUM_PAGEQ; qi++) {
+		uvmpd_drop(&uvm.pageqs[qi].inactive);
+		uvmpd_drop(&uvm.pageqs[qi].active);
+	}
 }
 
 #endif
