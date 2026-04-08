@@ -14,14 +14,14 @@
  */
 
 profile:hz:97 {
-	@[cpu, kstack] = count();
+	@cpu[cpu, kstack] = count();
 }
 
 interval:s:5 {
-	print(@);
-	clear(@);
+	print(@cpu);
+	clear(@cpu);
 }
 
 END {
-	clear(@);
+	clear(@cpu);
 }
