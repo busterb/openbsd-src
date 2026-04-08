@@ -49,15 +49,24 @@ def _parse_stack(key_str):
 
 def _make_profile(name, data, start_ms, end_ms, frame_index, frames, min_count):
     """Build one speedscope sampled profile entry."""
-    samples = []
-    weights = []
+    # Collect (parsed_names, count) pairs first so we can sort by name.
+    # Sorting by frame name sequence groups stacks with the same root
+    # functions together, giving speedscope's time-ordered view a proper
+    # flame graph shape instead of a scattered barcode.
+    stacks = []
     for key_str, count in data.items():
         count = int(count)
         if count < min_count:
             continue
         parsed = _parse_stack(key_str)
-        if not parsed:
-            continue
+        if parsed:
+            stacks.append((parsed, count))
+
+    stacks.sort(key=lambda pc: pc[0])
+
+    samples = []
+    weights = []
+    for parsed, count in stacks:
         indices = []
         for fname in parsed:
             if fname not in frame_index:
