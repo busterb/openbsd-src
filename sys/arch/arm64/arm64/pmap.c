@@ -1546,6 +1546,19 @@ pmap_deactivate(struct proc *p)
 	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
 	__asm volatile("isb");
 
+	/*
+	 * Update ci_curpm before decrementing pm_active.  ttlb_flush uses
+	 * "pm_active == 1 && curcpu()->ci_curpm == pm" to decide whether a
+	 * local-only TLB flush is safe.  If ci_curpm is left pointing at the
+	 * old pmap after deactivation, and another CPU then activates that
+	 * same pmap (raising pm_active back to 1), ttlb_flush on this CPU
+	 * would incorrectly conclude it is the sole active CPU and issue a
+	 * local-only flush — missing the entry on the CPU that actually has
+	 * the pmap loaded.  Resetting ci_curpm to pmap_kernel() here closes
+	 * that window.
+	 */
+	curcpu()->ci_curpm = pmap_kernel();
+
 	atomic_dec_int(&pm->pm_active);
 }
 
