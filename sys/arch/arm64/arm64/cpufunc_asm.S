@@ -133,6 +133,28 @@ ENTRY(cpu_tlb_flush_asid_all)
 	ret
 END(cpu_tlb_flush_asid_all)
 
+/* Invalidate all TLB entries for the given ASID on the local CPU only. */
+ENTRY(cpu_tlb_flush_asid_all_local)
+	RETGUARD_SETUP(cpu_tlb_flush_asid_all_local, x15)
+	dsb	ishst
+	tlbi	aside1, x0
+	dsb	ish
+	isb
+	RETGUARD_CHECK(cpu_tlb_flush_asid_all_local, x15)
+	ret
+END(cpu_tlb_flush_asid_all_local)
+
+/* Invalidate TLB entry for the given VA+ASID on the local CPU only. */
+ENTRY(cpu_tlb_flush_asid_local)
+	RETGUARD_SETUP(cpu_tlb_flush_asid_local, x15)
+	dsb	ishst
+	tlbi	vae1, x0
+	dsb	ish
+	isb
+	RETGUARD_CHECK(cpu_tlb_flush_asid_local, x15)
+	ret
+END(cpu_tlb_flush_asid_local)
+
 /*
  * void cpu_dcache_wb_range(vaddr_t, vsize_t)
  */
