@@ -44,6 +44,8 @@ void cpu_tlb_flush(void);
 void cpu_tlb_flush_asid(vaddr_t);
 void cpu_tlb_flush_all_asid(vaddr_t);
 void cpu_tlb_flush_asid_all(vaddr_t);
+void cpu_tlb_flush_asid_all_local(vaddr_t);
+void cpu_tlb_flush_asid_local(vaddr_t);
 void cpu_icache_sync_range(vaddr_t, vsize_t);
 void cpu_idcache_wbinv_range(vaddr_t, vsize_t);
 void cpu_dcache_wbinv_range(vaddr_t, vsize_t);

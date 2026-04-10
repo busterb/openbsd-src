@@ -41,6 +41,7 @@ static inline void
 ttlb_flush(pmap_t pm, vaddr_t va)
 {
 	vaddr_t resva;
+	uint32_t mybit;
 
 	if (!pm->pm_active)
 		return;
@@ -49,10 +50,24 @@ ttlb_flush(pmap_t pm, vaddr_t va)
 	if (pm == pmap_kernel()) {
 		cpu_tlb_flush_all_asid(resva);
 	} else {
+		mybit = 1U << CPU_INFO_UNIT(curcpu());
 		resva |= (uint64_t)pm->pm_asid << 48;
-		cpu_tlb_flush_asid(resva);
-		resva |= (uint64_t)ASID_USER << 48;
-		cpu_tlb_flush_asid(resva);
+		if (pm->pm_cpus == mybit) {
+			/*
+			 * This CPU is the only one with the pmap active.
+			 * pmap_deactivate() flushes the full ASID before
+			 * clearing pm_cpus, so any CPU that previously held
+			 * this pmap has already evicted its TLB entries.
+			 * Use a local-only VAE1 to avoid the broadcast stall.
+			 */
+			cpu_tlb_flush_asid_local(resva);
+			resva |= (uint64_t)ASID_USER << 48;
+			cpu_tlb_flush_asid_local(resva);
+		} else {
+			cpu_tlb_flush_asid(resva);
+			resva |= (uint64_t)ASID_USER << 48;
+			cpu_tlb_flush_asid(resva);
+		}
 	}
 }
 
@@ -1499,6 +1514,7 @@ pmap_activate(struct proc *p)
 void
 pmap_deactivate(struct proc *p)
 {
+	struct cpu_info *ci = curcpu();
 	pmap_t pm = p->p_vmspace->vm_map.pmap;
 
 	KASSERT(p == curproc);
@@ -1506,8 +1522,46 @@ pmap_deactivate(struct proc *p)
 	if (pm->pm_active == 0)
 		return;
 
+	if (pm != pmap_kernel()) {
+		/*
+		 * Flush this ASID from the local TLB before updating pm_cpus
+		 * and pm_active.  This establishes the invariant that once a
+		 * CPU's bit is absent from pm_cpus, that CPU holds no live TLB
+		 * entries for this ASID.  pmap_protect() and ttlb_flush() can
+		 * then safely use local-only TLBI when pm_cpus shows exactly
+		 * one CPU: any CPU that might race to re-activate the pmap
+		 * after that check will start with a clean TLB slate.
+		 *
+		 * Flush before clearing pm_cpus (not after) so that the
+		 * invariant holds at the moment we make the "sole active"
+		 * information visible to other CPUs.
+		 *
+		 * Skip for the kernel pmap: it uses ASID 0 which also covers
+		 * trampoline and signal-return pages; flushing it on every
+		 * kernel-thread context switch would evict those entries.
+		 */
+		cpu_tlb_flush_asid_all_local((uint64_t)pm->pm_asid << 48);
+		cpu_tlb_flush_asid_all_local(
+		    (uint64_t)(pm->pm_asid | ASID_USER) << 48);
+		atomic_clearbits_int(&pm->pm_cpus, 1U << CPU_INFO_UNIT(ci));
+	}
+
 	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
 	__asm volatile("isb");
+
+	/*
+	 * Reset ci_curpm to pmap_kernel() so that the next pmap_activate()
+	 * for any user pmap always calls pmap_setttb(), which re-adds the
+	 * CPU's bit to pm_cpus.  Without this, if the same user pmap is
+	 * immediately rescheduled on this CPU, pmap_activate() would see
+	 * pm == ci_curpm and skip pmap_setttb(), leaving pm_cpus cleared
+	 * and preventing the local-only TLBI optimisation from firing.
+	 *
+	 * Safe for pmap_rollover_asid(): cpu_setttb() inserts only bits
+	 * [15:0] of pm_asid into TTBR1; pmap_kernel()->pm_asid[15:0] is
+	 * always 0 regardless of any generation tag written by rollover.
+	 */
+	ci->ci_curpm = pmap_kernel();
 
 	atomic_dec_int(&pm->pm_active);
 }
@@ -1535,6 +1589,7 @@ pmap_purge(struct proc *p)
 	cpu_tlb_flush_asid_all((uint64_t)pm->pm_asid << 48);
 	cpu_tlb_flush_asid_all((uint64_t)(pm->pm_asid | ASID_USER) << 48);
 	pm->pm_pt0pa = pmap_kernel()->pm_pt0pa;
+	pm->pm_cpus = 0;
 	pm->pm_active = 0;
 }
 
@@ -1719,7 +1774,20 @@ pmap_protect(pmap_t pm, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 				pmap_page_ro_noflush(pm, sva, prot);
 				sva += PAGE_SIZE;
 			}
-			if (pm->pm_active) {
+			if (pm->pm_cpus == (1U << CPU_INFO_UNIT(curcpu()))) {
+				/*
+				 * This CPU is the only one with the pmap
+				 * active.  Use local-only ASIDE1 to avoid
+				 * the broadcast stall.  Safe because
+				 * pmap_deactivate() flushed on exit, so any
+				 * CPU that re-activates after this check
+				 * starts with a clean TLB.
+				 */
+				cpu_tlb_flush_asid_all_local(
+				    (uint64_t)pm->pm_asid << 48);
+				cpu_tlb_flush_asid_all_local(
+				    (uint64_t)(pm->pm_asid | ASID_USER) << 48);
+			} else if (pm->pm_active) {
 				cpu_tlb_flush_asid_all(
 				    (uint64_t)pm->pm_asid << 48);
 				cpu_tlb_flush_asid_all(
@@ -2455,6 +2523,32 @@ pmap_setttb(struct proc *p)
 {
 	struct cpu_info *ci = curcpu();
 	pmap_t pm = p->p_vmspace->vm_map.pmap;
+	pmap_t oldpm = ci->ci_curpm;
+
+	/*
+	 * If we are switching away from a user pmap, flush its ASID from
+	 * the local TLB and clear our CPU's bit in pm_cpus before loading
+	 * the new pmap.  This keeps pm_cpus accurate: a bit is set only
+	 * while the pmap is actually loaded in TTBR0 on that CPU.
+	 *
+	 * Accuracy matters because pmap_protect() and ttlb_flush() use
+	 * "pm_cpus == (1 << my_unit)" to decide whether a local-only TLBI
+	 * is safe.  Without clearing on switch-away, pm_cpus accumulates
+	 * bits from every CPU the process has ever migrated through, and
+	 * the sole-active check never fires.
+	 *
+	 * The exit path (pmap_deactivate) sets ci_curpm = pmap_kernel()
+	 * before calling cpu_switchto, so oldpm is pmap_kernel() there and
+	 * this block is correctly skipped — no double-flush.
+	 *
+	 * Guard against NULL ci_curpm during early per-CPU init.
+	 */
+	if (oldpm != NULL && oldpm != pmap_kernel() && oldpm != pm) {
+		cpu_tlb_flush_asid_all_local((uint64_t)oldpm->pm_asid << 48);
+		cpu_tlb_flush_asid_all_local(
+		    (uint64_t)(oldpm->pm_asid | ASID_USER) << 48);
+		atomic_clearbits_int(&oldpm->pm_cpus, 1U << CPU_INFO_UNIT(ci));
+	}
 
 	/*
 	 * If the generation of the ASID for the new pmap doesn't
@@ -2471,5 +2565,7 @@ pmap_setttb(struct proc *p)
 	__asm volatile("isb");
 	cpu_setttb(pm->pm_asid, pm->pm_pt0pa);
 	ci->ci_curpm = pm;
+	if (pm != pmap_kernel())
+		atomic_setbits_int(&pm->pm_cpus, 1U << CPU_INFO_UNIT(ci));
 	ci->ci_flush_bp();
 }
