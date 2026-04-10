@@ -58,6 +58,8 @@ uint64_t sched_wasidle;		/* Times we came out of idle */
 
 #ifdef __HAVE_CPU_TOPOLOGY
 int sched_blockcpu;		/* Types of cpu to not schedule on */
+int sched_cap_order = 1;	/* Order CPUs by capacity when choosing */
+int sched_use_lcores = 1;	/* Allow L cores to run background work */
 #endif
 
 /*
@@ -159,6 +161,8 @@ sched_rebuild_order(void)
 	struct cpu_info *key;
 	int i, j, n = 0;
 
+	SCHED_ASSERT_LOCKED();
+
 	CPU_INFO_FOREACH(cii, ci) {
 		if (cpuset_isset(&sched_all_cpus, ci))
 			sched_cpu_order[n++] = ci;
@@ -193,7 +197,9 @@ sched_idle(void *v)
 #ifdef __HAVE_CPU_TOPOLOGY
 	if ((ci->ci_cputype & sched_blockcpu) == 0)
 		cpuset_add(&sched_all_cpus, ci);
+	SCHED_LOCK();
 	sched_rebuild_order();
+	SCHED_UNLOCK();
 #else
 	cpuset_add(&sched_all_cpus, ci);
 #endif
@@ -447,24 +453,39 @@ sched_choosecpu_fork(struct proc *parent, int flags)
 
 #ifdef __HAVE_CPU_TOPOLOGY
 	/*
-	 * Iterate CPUs in capacity order: highest-capacity first for normal
-	 * work so that fast cores win ties; reversed for background (niced)
-	 * work so that slow cores absorb it without competing with fast ones.
+	 * Iterate CPUs in capacity order, highest first, so that fast cores
+	 * win ties for both normal and background work.  Normal work skips
+	 * L cores entirely; background work includes them so that L cores
+	 * absorb spillover only when all P/E cores are already busy.
+	 * When sched_cap_order is off, fall back to cpuset (CPU-number) order.
 	 */
 	{
 		int background = parent->p_p->ps_nice > NZERO;
-		int i, n = sched_ncpus_order;
 
-		for (i = background ? n - 1 : 0;
-		    background ? i >= 0 : i < n;
-		    i += background ? -1 : 1) {
-			ci = sched_cpu_order[i];
-			if (!cpuset_isset(&set, ci))
-				continue;
-			run = ci->ci_schedstate.spc_nrun;
-			if (choice == NULL || run < best_run) {
-				choice = ci;
-				best_run = run;
+		if (sched_cap_order) {
+			int i, n = sched_ncpus_order;
+			for (i = 0; i < n; i++) {
+				ci = sched_cpu_order[i];
+				if (!cpuset_isset(&set, ci))
+					continue;
+				if (!background && ci->ci_cputype == CPUTYP_L)
+					continue;
+				run = ci->ci_schedstate.spc_nrun;
+				if (choice == NULL || run < best_run) {
+					choice = ci;
+					best_run = run;
+				}
+			}
+		} else {
+			while ((ci = cpuset_first(&set)) != NULL) {
+				cpuset_del(&set, ci);
+				if (!background && ci->ci_cputype == CPUTYP_L)
+					continue;
+				run = ci->ci_schedstate.spc_nrun;
+				if (choice == NULL || run < best_run) {
+					choice = ci;
+					best_run = run;
+				}
 			}
 		}
 	}
@@ -516,11 +537,17 @@ sched_choosecpu(struct proc *p)
 	 * this is simple.
 	 * Also, our cpu might not be idle, but if it's the current cpu
 	 * and it has nothing else queued and we're curproc, take it.
+	 * Don't take this fast path for normal processes on L cores;
+	 * they must move to a P or E core.
 	 */
-	if (cpuset_isset(&set, p->p_cpu) ||
+	if ((cpuset_isset(&set, p->p_cpu) ||
 	    (p->p_cpu == curcpu() && p->p_cpu->ci_schedstate.spc_nrun == 0 &&
 	    (p->p_cpu->ci_schedstate.spc_schedflags & SPCF_SHOULDHALT) == 0 &&
-	    curproc == p)) {
+	    curproc == p))
+#ifdef __HAVE_CPU_TOPOLOGY
+	    && (p->p_p->ps_nice > NZERO || p->p_cpu->ci_cputype != CPUTYP_L)
+#endif
+	    ) {
 		sched_wasidle++;
 		return (p->p_cpu);
 	}
@@ -530,25 +557,41 @@ sched_choosecpu(struct proc *p)
 
 #ifdef __HAVE_CPU_TOPOLOGY
 	/*
-	 * Iterate CPUs in capacity order: highest-capacity first for normal
-	 * work so that fast cores win ties; reversed for background (niced)
-	 * work so that slow cores absorb it without competing with fast ones.
+	 * Iterate CPUs in capacity order, highest first, so that fast cores
+	 * win ties for both normal and background work.  Normal work skips
+	 * L cores entirely; background work includes them so that L cores
+	 * absorb spillover only when all P/E cores are already busy.
+	 * When sched_cap_order is off, fall back to cpuset (CPU-number) order.
 	 */
 	{
 		int background = p->p_p->ps_nice > NZERO;
-		int i, n = sched_ncpus_order;
 
-		for (i = background ? n - 1 : 0;
-		    background ? i >= 0 : i < n;
-		    i += background ? -1 : 1) {
-			int cost;
-			ci = sched_cpu_order[i];
-			if (!cpuset_isset(&set, ci))
-				continue;
-			cost = sched_proc_to_cpu_cost(ci, p);
-			if (choice == NULL || cost < last_cost) {
-				choice = ci;
-				last_cost = cost;
+		if (sched_cap_order) {
+			int i, n = sched_ncpus_order;
+			for (i = 0; i < n; i++) {
+				int cost;
+				ci = sched_cpu_order[i];
+				if (!cpuset_isset(&set, ci))
+					continue;
+				if (!background && ci->ci_cputype == CPUTYP_L)
+					continue;
+				cost = sched_proc_to_cpu_cost(ci, p);
+				if (choice == NULL || cost < last_cost) {
+					choice = ci;
+					last_cost = cost;
+				}
+			}
+		} else {
+			while ((ci = cpuset_first(&set)) != NULL) {
+				int cost;
+				cpuset_del(&set, ci);
+				if (!background && ci->ci_cputype == CPUTYP_L)
+					continue;
+				cost = sched_proc_to_cpu_cost(ci, p);
+				if (choice == NULL || cost < last_cost) {
+					choice = ci;
+					last_cost = cost;
+				}
 			}
 		}
 	}
@@ -608,6 +651,15 @@ sched_steal_proc(struct cpu_info *self)
 		TAILQ_FOREACH(p, &spc->spc_qs[queue], p_runq) {
 			if (p->p_flag & P_CPUPEG)
 				continue;
+#ifdef __HAVE_CPU_TOPOLOGY
+			/*
+			 * L cores only run background work; don't let them
+			 * steal normal processes from P or E cores.
+			 */
+			if (self->ci_cputype == CPUTYP_L &&
+			    p->p_p->ps_nice <= NZERO)
+				continue;
+#endif
 			cost = sched_proc_to_cpu_cost(self, p);
 
 			if (best == NULL || cost < bestcost) {
@@ -953,7 +1005,9 @@ sched_cpuadjust(int newblockcpu)
 				cpuset_add(&sched_all_cpus, ci);
 		}
 	}
+	SCHED_LOCK();
 	sched_rebuild_order();
+	SCHED_UNLOCK();
 	return 0;
 }
 
@@ -1019,5 +1073,27 @@ sysctl_hwblockcpu(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
 }
 
 #endif /* SMALL_KERNEL */
+
+int
+sysctl_hwschedcaporder(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
+{
+	return sysctl_int_bounded(oldp, oldlenp, newp, newlen,
+	    &sched_cap_order, 0, 1);
+}
+
+int
+sysctl_hwschedlcores(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
+{
+	int err, newval = sched_use_lcores;
+
+	err = sysctl_int_bounded(oldp, oldlenp, newp, newlen, &newval, 0, 1);
+	if (err || newp == NULL || newval == sched_use_lcores)
+		return err;
+	sched_use_lcores = newval;
+	if (sched_use_lcores)
+		return sched_cpuadjust(sched_blockcpu & ~CPUTYP_L);
+	else
+		return sched_cpuadjust(sched_blockcpu | CPUTYP_L);
+}
 
 #endif /* __HAVE_CPU_TOPOLOGY */
