@@ -69,6 +69,14 @@ struct pmap {
 	int have_4_level_pt;
 	int pm_privileged;
 	volatile int pm_active;
+	/*
+	 * Bitmask of CPUs that currently have this pmap loaded in TTBR0,
+	 * indexed by CPU_INFO_UNIT(ci) (i.e. ci->ci_dev->dv_unit).
+	 * Maintained alongside pm_active to identify the sole-active-CPU
+	 * case and safely use local-only TLB invalidation.
+	 * Supports up to 32 CPUs; adjust to uint64_t if needed beyond that.
+	 */
+	volatile uint32_t pm_cpus;
 	int pm_refs;				/* ref count */
 	struct pmap_statistics  pm_stats;	/* pmap statistics */
 	uint64_t pm_apiakey[2];
