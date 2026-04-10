@@ -80,6 +80,7 @@
 #endif
 
 #include <uvm/uvm.h>
+#include <uvm/uvm_swap.h>
 
 #include "drm.h"
 
@@ -239,6 +240,8 @@ uvm_pageout(void *arg)
 		} else {
 			constraint = no_constraint;
 		}
+		size = MAX(size, 128);
+
 		/* How many pages do we need to free during this round? */
 		shortage = uvmexp.freetarg - atomic_load_sint(&uvmexp.free) +
 		    BUFPAGES_DEFICIT;
@@ -262,8 +265,6 @@ uvm_pageout(void *arg)
 		/* Reclaim pages from the buffer cache if possible. */
 		if (shortage > 0)
 			size += shortage;
-		if (size == 0)
-			size = 16; /* XXX */
 
 		shortage -= bufbackoff(&constraint, size * 2);
 #if NDRM > 0
@@ -273,16 +274,11 @@ uvm_pageout(void *arg)
 		if (shortage > 0)
 			shortage -= uvm_pmr_cache_drain();
 
-		/* XXX remove shortage as parameter below */
-		if (shortage < 0)
-			shortage = 0;
+		inactive_shortage = MAX(inactive_shortage, size * 2);
+		shortage = MAX(shortage, size);
 
-		/*
-		 * scan if needed
-		 */
 		uvm_lock_pageq();
-		if (pma || shortage > 0 || inactive_shortage > 0)
-			uvmpd_scan(&constraint, shortage, inactive_shortage);
+		uvmpd_scan(&constraint, shortage, inactive_shortage);
 
 		/*
 		 * if there's any free memory to be had,
@@ -707,6 +703,16 @@ uvmpd_scan_inactive(struct uvm_constraint_range *constraint, int shortage)
 		 */
 		if (atomic_load_sint(&uvmexp.paging) > (shortage - freed)) {
 			rw_exit(slock);
+			continue;
+		}
+
+		/*
+		 * If no swap encrypt buffers, leave the page on the
+		 * inactive list for future processing
+		 */
+		if (seb_free == 0) {
+			rw_exit(slock);
+			atomic_inc_int(&uvmexp.swpskip);
 			continue;
 		}
 

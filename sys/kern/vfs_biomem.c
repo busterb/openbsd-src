@@ -272,7 +272,7 @@ buf_alloc_pages(struct buf *bp, vsize_t size)
 		    UVM_PLA_NOWAIT | UVM_PLA_NOWAKE);
 		if (i == 0)
 			break;
-	} while	(bufbackoff(&dma_constraint, size) >= size);
+	} while	(bufbackoff(&dma_constraint, atop(size)) >= atop(size));
 	if (i != 0)
 		i = uvm_pagealloc_multi(&bp->b_uobj, 0, size,
 		    UVM_PLA_WAITOK);

@@ -54,6 +54,8 @@ void			uvm_swap_initcrypt_all(void);
 void			uvm_swap_finicrypt_all(void);
 #endif
 
+extern volatile int seb_free;
+
 #endif /* _KERNEL */
 
 #endif /* _UVM_UVM_SWAP_H_ */
