@@ -281,18 +281,21 @@ acpicpu_calcfreq(struct acpicpu_softc *sc, uint64_t perf)
 int
 acpicpu_cpuspeed(int *freq)
 {
-	struct acpicpu_softc *sc = NULL;
+	struct acpicpu_softc *sc, *best = NULL;
 	uint64_t perf = 0;
 	int i;
 
-	/* Find the first CPU for which we know the nominal frequency. */
+	/* Find the CPU with the highest nominal frequency. */
 	for (i = 0; i < acpicpu_cd.cd_ndevs; i++) {
 		sc = acpicpu_cd.cd_devs[i];
-		if (sc && sc->sc_nominal_freq > 0)
-			break;
+		if (sc == NULL || sc->sc_nominal_freq == 0)
+			continue;
+		if (best == NULL || sc->sc_nominal_freq > best->sc_nominal_freq)
+			best = sc;
 	}
-	if (sc == NULL)
+	if (best == NULL)
 		return EOPNOTSUPP;
+	sc = best;
 
 	acpi_gasio(sc->sc_acpi, ACPI_IOREAD,
 	    sc->sc_desired_perf.address_space_id, sc->sc_desired_perf.address,
