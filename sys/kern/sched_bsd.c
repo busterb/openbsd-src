@@ -616,17 +616,42 @@ setperf_auto(void *v)
 		goto faster;
 	}
 
-	if (!idleticks)
+	if (!idleticks) {
 		if (!(idleticks = mallocarray(ncpusfound, sizeof(*idleticks),
 		    M_DEVBUF, M_NOWAIT | M_ZERO)))
 			return;
-	if (!totalticks)
 		if (!(totalticks = mallocarray(ncpusfound, sizeof(*totalticks),
 		    M_DEVBUF, M_NOWAIT | M_ZERO))) {
 			free(idleticks, M_DEVBUF,
 			    sizeof(*idleticks) * ncpusfound);
+			idleticks = NULL;
 			return;
 		}
+		/*
+		 * Seed the baseline with current tick counts so the first
+		 * delta covers only the interval since allocation, not the
+		 * entire time since boot.  Without this, the first call
+		 * sees a large idle fraction (boot was idle) and drives
+		 * perflevel to 0 right as a new workload starts.
+		 */
+		j = 0;
+		CPU_INFO_FOREACH(cii, ci) {
+			struct schedstate_percpu *spc;
+
+			if (!cpu_is_online(ci))
+				continue;
+			spc = &ci->ci_schedstate;
+			pc_cons_enter(&spc->spc_cp_time_lock, &gen);
+			do {
+				totalticks[j] = 0;
+				for (i = 0; i < CPUSTATES; i++)
+					totalticks[j] += spc->spc_cp_time[i];
+				idleticks[j] = spc->spc_cp_time[CP_IDLE];
+			} while (pc_cons_leave(&spc->spc_cp_time_lock, &gen) != 0);
+			j++;
+		}
+		j = 0;
+	}
 	CPU_INFO_FOREACH(cii, ci) {
 		struct schedstate_percpu *spc;
 
@@ -757,6 +782,16 @@ sysctl_hwperfpolicy(void *oldp, size_t *oldlenp, void *newp, size_t newlen)
 	}
 
 	if (current_perfpolicy() == PERFPOL_HIGH) {
+		perflevel = 100;
+		cpu_setperf(perflevel);
+	} else if (perfpolicy_dynamic()) {
+		/*
+		 * When transitioning to AUTO, start at full performance and
+		 * let setperf_auto dial back if the system is truly idle.
+		 * This allows hardware with its own gradual ramp-up policy
+		 * to begin climbing immediately rather than waiting for the
+		 * first setperf_auto tick to detect load.
+		 */
 		perflevel = 100;
 		cpu_setperf(perflevel);
 	}
