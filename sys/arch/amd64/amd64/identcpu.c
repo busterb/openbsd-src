@@ -923,6 +923,23 @@ cpu_topology(struct cpu_info *ci)
 	}
 	*typ ='\0';
 
+	/*
+	 * Assign scheduling capacity.  Values are relative ranks used by the
+	 * capacity-ordered scheduler; no DMIPS data is available on x86 so
+	 * these are heuristics.  SMT siblings share a physical core's
+	 * execution resources and are ranked below physical cores so that
+	 * the scheduler prefers physical cores and uses SMT threads as
+	 * overflow, via the cost penalty and migration logic in kern_sched.c.
+	 */
+	if (ci->ci_cputype & CPUTYP_SMT)
+		ci->ci_capacity = 50;
+	else if (ci->ci_cputype & CPUTYP_L)
+		ci->ci_capacity = 40;
+	else if (ci->ci_cputype & CPUTYP_E)
+		ci->ci_capacity = 75;
+	else
+		ci->ci_capacity = 100;
+
 #ifdef DEBUG
 	printf("cpu%d: smt %u, core %u, pkg %u "
 		"(apicid 0x%x, max_apicid 0x%x, max_coreid 0x%x, smt_bits 0x%x, smt_mask 0x%x, "
