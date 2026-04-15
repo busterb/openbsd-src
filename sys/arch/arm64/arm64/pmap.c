@@ -37,11 +37,25 @@ void pmap_free_asid(pmap_t pm);
 /* We run userland code with ASIDs that have the low bit set. */
 #define ASID_USER	1
 
+static inline int
+pmap_is_sole_cpu(pmap_t pm, int unit)
+{
+	int w;
+
+	if (pm->pm_cpus[unit / 32] != (1U << (unit % 32)))
+		return 0;
+	for (w = 0; w < howmany(MAXCPUS, 32); w++) {
+		if (w != unit / 32 && pm->pm_cpus[w] != 0)
+			return 0;
+	}
+	return 1;
+}
+
 static inline void
 ttlb_flush(pmap_t pm, vaddr_t va)
 {
 	vaddr_t resva;
-	uint32_t mybit;
+	int myunit;
 
 	if (!pm->pm_active)
 		return;
@@ -50,9 +64,9 @@ ttlb_flush(pmap_t pm, vaddr_t va)
 	if (pm == pmap_kernel()) {
 		cpu_tlb_flush_all_asid(resva);
 	} else {
-		mybit = 1U << CPU_INFO_UNIT(curcpu());
+		myunit = CPU_INFO_UNIT(curcpu());
 		resva |= (uint64_t)pm->pm_asid << 48;
-		if (pm->pm_cpus == mybit) {
+		if (pmap_is_sole_cpu(pm, myunit)) {
 			/*
 			 * This CPU is the only one with the pmap active.
 			 * pmap_deactivate() flushes the full ASID before
@@ -1543,7 +1557,8 @@ pmap_deactivate(struct proc *p)
 		cpu_tlb_flush_asid_all_local((uint64_t)pm->pm_asid << 48);
 		cpu_tlb_flush_asid_all_local(
 		    (uint64_t)(pm->pm_asid | ASID_USER) << 48);
-		atomic_clearbits_int(&pm->pm_cpus, 1U << CPU_INFO_UNIT(ci));
+		atomic_clearbits_int(&pm->pm_cpus[CPU_INFO_UNIT(ci) / 32],
+		    1U << (CPU_INFO_UNIT(ci) % 32));
 	}
 
 	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
@@ -1589,7 +1604,7 @@ pmap_purge(struct proc *p)
 	cpu_tlb_flush_asid_all((uint64_t)pm->pm_asid << 48);
 	cpu_tlb_flush_asid_all((uint64_t)(pm->pm_asid | ASID_USER) << 48);
 	pm->pm_pt0pa = pmap_kernel()->pm_pt0pa;
-	pm->pm_cpus = 0;
+	memset((void *)pm->pm_cpus, 0, sizeof(pm->pm_cpus));
 	pm->pm_active = 0;
 }
 
@@ -1774,7 +1789,7 @@ pmap_protect(pmap_t pm, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 				pmap_page_ro_noflush(pm, sva, prot);
 				sva += PAGE_SIZE;
 			}
-			if (pm->pm_cpus == (1U << CPU_INFO_UNIT(curcpu()))) {
+			if (pmap_is_sole_cpu(pm, CPU_INFO_UNIT(curcpu()))) {
 				/*
 				 * This CPU is the only one with the pmap
 				 * active.  Use local-only ASIDE1 to avoid
@@ -2532,7 +2547,7 @@ pmap_setttb(struct proc *p)
 	 * while the pmap is actually loaded in TTBR0 on that CPU.
 	 *
 	 * Accuracy matters because pmap_protect() and ttlb_flush() use
-	 * "pm_cpus == (1 << my_unit)" to decide whether a local-only TLBI
+	 * pmap_is_sole_cpu() to decide whether a local-only TLBI
 	 * is safe.  Without clearing on switch-away, pm_cpus accumulates
 	 * bits from every CPU the process has ever migrated through, and
 	 * the sole-active check never fires.
@@ -2547,7 +2562,8 @@ pmap_setttb(struct proc *p)
 		cpu_tlb_flush_asid_all_local((uint64_t)oldpm->pm_asid << 48);
 		cpu_tlb_flush_asid_all_local(
 		    (uint64_t)(oldpm->pm_asid | ASID_USER) << 48);
-		atomic_clearbits_int(&oldpm->pm_cpus, 1U << CPU_INFO_UNIT(ci));
+		atomic_clearbits_int(&oldpm->pm_cpus[CPU_INFO_UNIT(ci) / 32],
+		    1U << (CPU_INFO_UNIT(ci) % 32));
 	}
 
 	/*
@@ -2566,6 +2582,7 @@ pmap_setttb(struct proc *p)
 	cpu_setttb(pm->pm_asid, pm->pm_pt0pa);
 	ci->ci_curpm = pm;
 	if (pm != pmap_kernel())
-		atomic_setbits_int(&pm->pm_cpus, 1U << CPU_INFO_UNIT(ci));
+		atomic_setbits_int(&pm->pm_cpus[CPU_INFO_UNIT(ci) / 32],
+		    1U << (CPU_INFO_UNIT(ci) % 32));
 	ci->ci_flush_bp();
 }

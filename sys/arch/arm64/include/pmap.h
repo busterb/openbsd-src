@@ -74,9 +74,9 @@ struct pmap {
 	 * indexed by CPU_INFO_UNIT(ci) (i.e. ci->ci_dev->dv_unit).
 	 * Maintained alongside pm_active to identify the sole-active-CPU
 	 * case and safely use local-only TLB invalidation.
-	 * Supports up to 32 CPUs; adjust to uint64_t if needed beyond that.
+	 * Sized as uint32_t words to match atomic_setbits_int/atomic_clearbits_int.
 	 */
-	volatile uint32_t pm_cpus;
+	volatile uint32_t pm_cpus[howmany(MAXCPUS, 32)];
 	int pm_refs;				/* ref count */
 	struct pmap_statistics  pm_stats;	/* pmap statistics */
 	uint64_t pm_apiakey[2];
