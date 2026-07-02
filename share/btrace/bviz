@@ -12,8 +12,11 @@
 #   maphist  @map[key] = hist(v)  -> 2-D heatmap (rows=keys, cols=buckets)
 #   hist     @h = hist(v)         -> bar chart
 #   map      @map[key] = count()  -> bar chart sorted by value
+#   map      @map[kstack] = count() -> vertical icicle chart (root left,
+#                                      depth right, height ∝ sample count)
 
 import json
+import os
 import sys
 import time
 
@@ -137,11 +140,214 @@ def render_hist(obj):
         print(f'{lbl:>8} {val:8d} |{"#" * i}{" " * (bar_width - i)}|')
 
 
+def _parse_stack(key_str):
+    """
+    Parse a btrace kstack/ustack key into a list of frame names,
+    outermost (root-ward) first.
+
+    btrace formats each frame as '\nfuncname+0xOFFSET'; the final
+    frame is '\nkernel\n' or '\nuserland\n'.  We strip offsets and
+    reverse so the outermost frame comes first (root at top in the
+    icicle chart).
+    """
+    frames = []
+    for f in key_str.split('\n'):
+        f = f.strip()
+        if not f:
+            continue
+        # strip +0xOFFSET
+        plus = f.find('+')
+        if plus > 0:
+            f = f[:plus]
+        frames.append(f)
+    frames.reverse()
+    return frames
+
+
+def _build_flame_tree(data):
+    """
+    Build a prefix tree from {stack_str: count}.
+    Each node: {'total': N, 'children': {name: node}}.
+    """
+    root = {'total': 0, 'children': {}}
+    for key_str, count in data.items():
+        count = int(count)
+        frames = _parse_stack(key_str)
+        root['total'] += count
+        node = root
+        for frame in frames:
+            if frame not in node['children']:
+                node['children'][frame] = {'total': 0, 'children': {}}
+            node = node['children'][frame]
+            node['total'] += count
+    return root
+
+
+# ── Vertical icicle chart ───────────────────────────────────────────────
+# Each column = one call-stack depth level; cell height ∝ sample count.
+# Color is inherited from the depth-1 ancestor so related branches share
+# a hue.  All cells use bright-white foreground on a dark background.
+
+# 256-color backgrounds: dark/medium shades with good white-text contrast.
+_IC_PALETTE = [
+    22,   # dark green
+    18,   # dark navy
+    52,   # dark maroon
+    58,   # dark olive
+    23,   # dark teal
+    53,   # dark purple
+    88,   # dark crimson
+    130,  # dark orange-brown
+    28,   # medium green
+    24,   # medium blue
+    54,   # dark violet
+    94,   # dark gold
+    30,   # dark cyan
+    19,   # blue-purple
+    89,   # dark fuchsia
+    100,  # dark yellow-green
+]
+_IC_ROOT_BG  = 236   # root "all" cell: very dark gray
+_IC_EMPTY_BG = 234   # unused grid cells: near-black
+_IC_SEP_BG   = 232   # column separator: darkest gray
+_IC_FG       = 231   # bright white text
+_IC_COL_W    = 20    # total column width (content + 1-char separator)
+_IC_CELL_W   = _IC_COL_W - 1  # usable content width per cell
+
+# Stable color cache: function name -> palette index, persists across renders
+# so that secondary-branch colors don't change between refreshes.
+_ic_color_cache = {}
+_ic_color_next  = [0]  # next palette slot to assign to a new name
+
+def _ic_color(name):
+    """Return a stable palette background color for `name`."""
+    if name not in _ic_color_cache:
+        _ic_color_cache[name] = _ic_color_next[0] % len(_IC_PALETTE)
+        _ic_color_next[0] += 1
+    return _IC_PALETTE[_ic_color_cache[name]]
+
+
+def render_flamegraph(obj):
+    """
+    Vertical icicle chart: root at left, depth grows rightward.
+
+    Each column is a call-stack depth level.  Within a column, sibling
+    cells are stacked top-to-bottom sorted by sample count (most frequent
+    first).  Cell height is proportional to sample count.  Color is
+    assigned per top-level branch and inherited by all descendants.
+    """
+    name  = obj['name']
+    data  = obj['data']
+    ts    = obj.get('ts', 0)
+
+    try:
+        sz     = os.get_terminal_size()
+        term_h = max(8,  min(sz.lines - 3, 300))
+        term_w = max(40, min(sz.columns,   500))
+    except OSError:
+        term_h, term_w = 40, 120
+
+    ts_str = time.strftime('%H:%M:%S', time.localtime(ts))
+    print(f'{BOLD}@{name}{RESET}  [{ts_str}]')
+
+    root  = _build_flame_tree(data)
+    total = root['total']
+    if total == 0:
+        return
+
+    max_depth = max(1, term_w // _IC_COL_W)
+
+    # ── 1. Collect layout ────────────────────────────────────────────────
+    # Skip the boring all→kernel (or all→userland) single-child prefix:
+    # any leading node with exactly one child is always shown at 100% and
+    # adds no useful information.
+    display_root = root
+    while len(display_root['children']) == 1:
+        display_root = next(iter(display_root['children'].values()))
+
+    # items: list of (depth, y0, cell_h, label, node_total, bg_color)
+    items = []
+
+    def _collect(node, depth, y_lo, y_hi, label, bg):
+        if depth >= max_depth or (y_hi - y_lo) * term_h < 0.5:
+            return
+        y0     = round(y_lo * term_h)
+        cell_h = max(1, round(y_hi * term_h) - y0)
+        items.append((depth, y0, cell_h, label, node['total'], bg))
+        children = sorted(node['children'].items(),
+                          key=lambda kv: -kv[1]['total'])
+        span = y_hi - y_lo
+        cum  = y_lo
+        for j, (cname, cnode) in enumerate(children):
+            cf = span * cnode['total'] / node['total']
+            # Largest child inherits parent color (visual continuity).
+            # Every other sibling gets its own stable color by name.
+            child_bg = bg if j == 0 else _ic_color(cname)
+            _collect(cnode, depth + 1, cum, cum + cf, cname, child_bg)
+            cum += cf
+
+    # Seed the first visible column; each top-level branch gets its own
+    # stable color (assigned on first appearance, reused on later renders).
+    children_top = sorted(display_root['children'].items(),
+                          key=lambda kv: -kv[1]['total'])
+    cum = 0.0
+    for cname, cnode in children_top:
+        cf = cnode['total'] / display_root['total']
+        _collect(cnode, 0, cum, cum + cf, cname, _ic_color(cname))
+        cum += cf
+
+    # ── 2. Build character grid ──────────────────────────────────────────
+    bg_grid = [[_IC_EMPTY_BG] * term_w for _ in range(term_h)]
+    ch_grid = [[' ']           * term_w for _ in range(term_h)]
+
+    for depth, y0, cell_h, label, node_total, bg in items:
+        x0 = depth * _IC_COL_W
+        x1 = min(x0 + _IC_CELL_W, term_w)
+        if x0 >= term_w:
+            continue
+        for row in range(y0, min(y0 + cell_h, term_h)):
+            for col in range(x0, x1):
+                bg_grid[row][col] = bg
+        pct  = int(node_total * 100 / total)
+        text = f'{pct:3d}% {label}'
+        for i, c in enumerate(text[:_IC_CELL_W]):
+            if y0 < term_h:
+                ch_grid[y0][x0 + i] = c
+
+    # Separator columns between depth levels
+    for d in range(1, max_depth + 1):
+        sep = d * _IC_COL_W - 1
+        if sep >= term_w:
+            break
+        for row in range(term_h):
+            bg_grid[row][sep] = _IC_SEP_BG
+            ch_grid[row][sep] = ' '
+
+    # ── 3. Render ────────────────────────────────────────────────────────
+    _FG = f'\033[38;5;{_IC_FG}m'
+    for row in range(term_h):
+        parts   = []
+        prev_bg = -1
+        for col in range(term_w):
+            bg = bg_grid[row][col]
+            if bg != prev_bg:
+                parts.append(f'\033[48;5;{bg}m{_FG}')
+                prev_bg = bg
+            parts.append(ch_grid[row][col])
+        parts.append(RESET)
+        sys.stdout.write(''.join(parts) + '\n')
+
+
 def render_map(obj):
-    """Simple map as a bar chart sorted by descending value."""
+    """Map as a bar chart, or a flame graph if keys are stack traces."""
     name = obj['name']
     data = obj['data']
     ts   = obj.get('ts', 0)
+
+    # kstack/ustack keys contain '\n'-separated frames
+    if data and any('\n' in k for k in data):
+        render_flamegraph(obj)
+        return
 
     if not data:
         return
