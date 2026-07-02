@@ -214,6 +214,9 @@ pseudo-device	kexec
 file	arch/amd64/amd64/kexec.c	kexec needs-flag
 file	arch/amd64/amd64/kexec_subr.S	kexec needs-flag
 
+# kprobe provider bits shared with i386
+file	dev/dt/dt_prov_kprobe_x86.c		dt
+
 #
 # Machine-independent HID support
 #

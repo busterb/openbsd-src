@@ -218,6 +218,9 @@ file	arch/i386/i386/pctr.c		pctr needs-flag
 pseudo-device	nvram
 file	arch/i386/i386/nvram.c	nvram needs-flag
 
+# kprobe provider bits shared with amd64
+file	dev/dt/dt_prov_kprobe_x86.c		dt
+
 #
 # EISA-only drivers
 #
