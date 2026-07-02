@@ -27,7 +27,7 @@
 /*
  * Length of provider/probe/function names, including NUL.
  */
-#define DTNAMESIZE	16
+#define DTNAMESIZE	64
 
 /*
  * Length of process name, including NUL.
@@ -219,13 +219,11 @@ struct dt_probe {
 	const char		*dtp_argtype[DTMAXARGTYPES];
 						/* [I] type of arguments */
 	int			 dtp_nargs;	/* [I] # of arguments */
-#ifdef DDBPROF
 	int			 dtp_type;	/* [I] 'entry' or 'return' */
 	vaddr_t			 dtp_addr;	/* [I] address of breakpoint */
 	SLIST_ENTRY(dt_probe)	 dtp_knext;	/* [K] list of ELF kprobe */
 #ifdef __aarch64__
 	uint32_t		 dtp_savedinsn;	/* [I] original instruction word (arm64) */
-#endif
 #endif
 };
 
