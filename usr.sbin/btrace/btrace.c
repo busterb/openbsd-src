@@ -2389,6 +2389,7 @@ stmt_store(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AT_BI_GID:
 	case B_AT_BI_RETVAL:
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
+	case B_AT_FN_SIZEOF:
 	case B_AT_FN_DEREF:
 	case B_AT_FN_SUBSCRIPT:
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
@@ -2571,6 +2572,7 @@ baeval(struct bt_arg *bval, struct dt_evt *dtev)
 	case B_AT_BI_GID:
 	case B_AT_BI_ARG0 ... B_AT_BI_ARG9:
 	case B_AT_BI_RETVAL:
+	case B_AT_FN_SIZEOF:
 	case B_AT_FN_DEREF:
 	case B_AT_FN_SUBSCRIPT:
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
@@ -2887,6 +2889,8 @@ ba_name(struct bt_arg *ba)
 		return "probe";
 	case B_AT_FN_STR:
 		return "str";
+	case B_AT_FN_SIZEOF:
+		return "sizeof";
 	case B_AT_FN_DEREF: {
 		static char buf[64];
 		struct bt_deref *bd = ba->ba_value;
@@ -3038,6 +3042,20 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_BI_PROBE:
 		val = dtev->dtev_pbn;
 		break;
+	case B_AT_FN_SIZEOF: {
+		const char *tname = (const char *)ba->ba_value;
+		uint16_t typeid;
+		ssize_t sz;
+
+		if (ctf_handle == NULL || tname == NULL) {
+			val = 0;
+			break;
+		}
+		typeid = ctf_type_by_name(ctf_handle, tname);
+		sz = (typeid != 0) ? ctf_type_size(ctf_handle, typeid) : -1;
+		val = (sz > 0) ? sz : 0;
+		break;
+	}
 	case B_AT_FN_DEREF: {
 		struct bt_deref *bd = ba->ba_value;
 		val = (bd->bd_slot != BD_SLOT_UNSET)
@@ -3243,6 +3261,7 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 		str = buf;
 		break;
 	}
+	case B_AT_FN_SIZEOF:
 	case B_AT_OP_PLUS ... B_AT_OP_SHR:
 		snprintf(buf, sizeof(buf), "%ld", ba2long(ba, dtev));
 		str = buf;
@@ -3338,6 +3357,9 @@ ba2flags(struct bt_arg *ba)
 			flags |= DTEVT_FUNCARGS | DTEVT_STRARGS;
 		break;
 	}
+	case B_AT_FN_SIZEOF:
+		/* sizeof is a compile-time constant; no kernel data needed. */
+		break;
 	case B_AT_FN_DEREF:
 	case B_AT_FN_SUBSCRIPT:
 		/* We need the arg's register value (pointer) to dereference. */
