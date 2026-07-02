@@ -236,12 +236,25 @@ entries in
 .It Fn printf "fmt" ...
 Print formatted string
 .Va fmt .
-.It Fn str "$N" "[index]"
-Return the string from argument
-.Va $N ,
-truncated to
-.Va index
-characters (up to 64, the default) including a guaranteed NUL-terminator.
+.It Fn str "expr" "[maxlen]"
+When
+.Va expr
+is a probe argument
+.Pq Va arg0 No through Va arg9 ,
+return the NUL-terminated string it points to.
+The string is copied at probe fire time.
+The copy direction is determined automatically: addresses below
+.Dv VM_MAXUSER_ADDRESS
+are copied from user address space using
+.Xr copyinstr 9 ;
+kernel addresses are copied using
+.Xr kcopy 9 .
+For any other expression,
+.Va expr
+is converted to a string representation at display time.
+The result is truncated to
+.Va maxlen
+bytes (up to 1024, the default), including the NUL-terminator.
 .It Fn time timefmt
 Print timestamps using
 .Xr strftime 3 .
