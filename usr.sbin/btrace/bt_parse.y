@@ -136,7 +136,7 @@ static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 %token	<v.i>		OP_BANDEQ OP_BOREQ OP_XOREQ OP_SHLEQ OP_SHREQ
 %token	<v.i>		OP_INC OP_DEC
 /* Builtins */
-%token	<v.i>		BUILTIN BEGIN BREAK CONTINUE ELSE END FOR IF SIZEOF STR WHILE
+%token	<v.i>		BUILTIN BEGIN BREAK CONTINUE ELSE END FOR IF KSYM SIZEOF STR USYM WHILE
 /* Functions and Map operators */
 %token  <v.i>		F_DELETE F_PRINT
 %token	<v.i>		MFUNC FUNC0 FUNC1 FUNCN OP1 OP2 OP4 MOP0 MOP1
@@ -255,6 +255,8 @@ factor : '(' expr ')'		{ $$ = $2; }
 func	: STR '(' factor ')'		{ $$ = ba_new($3, B_AT_FN_STR); }
 	| STR '(' factor ',' expr ')'	{ $$ = ba_op(B_AT_FN_STR, $3, $5); }
 	| SIZEOF '(' typename ')'	{ $$ = ba_new($3, B_AT_FN_SIZEOF); }
+	| KSYM '(' expr ')'		{ $$ = ba_new($3, B_AT_FN_KSYM); }
+	| USYM '(' expr ')'		{ $$ = ba_new($3, B_AT_FN_USYM); }
 	;
 
 typename : STRING			{ $$ = $1; }
@@ -1076,6 +1078,7 @@ lookup(char *s)
 		{ "hist",	OP1,		0 },
 		{ "if",		IF,		0 },
 		{ "kstack",	BUILTIN,	B_AT_BI_KSTACK },
+		{ "ksym",	KSYM,		B_AT_FN_KSYM },
 		{ "lhist",	OP4,		0 },
 		{ "max",	MOP1,		B_AT_MF_MAX },
 		{ "min",	MOP1,		B_AT_MF_MIN },
@@ -1085,14 +1088,15 @@ lookup(char *s)
 		{ "printf",	FUNCN,		B_AC_PRINTF },
 		{ "probe",	BUILTIN,	B_AT_BI_PROBE },
 		{ "retval",	BUILTIN,	B_AT_BI_RETVAL },
-		{ "stats",	MOP1,		B_AT_MF_STATS },
 		{ "sizeof",	SIZEOF,		B_AT_FN_SIZEOF },
+		{ "stats",	MOP1,		B_AT_MF_STATS },
 		{ "str",	STR,		B_AT_FN_STR },
 		{ "sum",	MOP1,		B_AT_MF_SUM },
 		{ "tid",	BUILTIN,	B_AT_BI_TID },
 		{ "time",	FUNC1,		B_AC_TIME },
 		{ "uid",	BUILTIN,	B_AT_BI_UID },
 		{ "ustack",	BUILTIN,	B_AT_BI_USTACK },
+		{ "usym",	USYM,		B_AT_FN_USYM },
 		{ "while",	WHILE,		0 },
 		{ "zero",	MFUNC,		B_AC_ZERO },
 	};
