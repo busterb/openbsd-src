@@ -136,7 +136,7 @@ static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 %token	<v.i>		OP_BANDEQ OP_BOREQ OP_XOREQ OP_SHLEQ OP_SHREQ
 %token	<v.i>		OP_INC OP_DEC
 /* Builtins */
-%token	<v.i>		BUILTIN BEGIN BREAK CONTINUE ELSE END FOR IF KSYM NTOP SIZEOF STR STRNCMP USYM WHILE
+%token	<v.i>		BUILTIN BEGIN BREAK CONTINUE ELSE END FOR IF KSYM LEN NTOP SIZEOF STR STRNCMP USYM WHILE
 /* Functions and Map operators */
 %token  <v.i>		F_DELETE F_PRINT
 %token	<v.i>		MFUNC FUNC0 FUNC1 FUNCN OP1 OP2 OP4 MOP0 MOP1
@@ -257,6 +257,7 @@ func	: STR '(' factor ')'		{ $$ = ba_new($3, B_AT_FN_STR); }
 	| SIZEOF '(' typename ')'	{ $$ = ba_new($3, B_AT_FN_SIZEOF); }
 	| KSYM '(' expr ')'		{ $$ = ba_new($3, B_AT_FN_KSYM); }
 	| USYM '(' expr ')'		{ $$ = ba_new($3, B_AT_FN_USYM); }
+	| LEN '(' variable ')'		{ $$ = ba_new($3, B_AT_FN_LEN); }
 	| NTOP '(' expr ')'		{ $$ = ba_new($3, B_AT_FN_NTOP); }
 	| NTOP '(' expr ',' expr ')'	{ $$ = ba_new(ba_append($3, $5), B_AT_FN_NTOP); }
 	| STRNCMP '(' expr ',' expr ',' expr ')'
@@ -1085,6 +1086,7 @@ lookup(char *s)
 		{ "if",		IF,		0 },
 		{ "kstack",	BUILTIN,	B_AT_BI_KSTACK },
 		{ "ksym",	KSYM,		B_AT_FN_KSYM },
+		{ "len",	LEN,		B_AT_FN_LEN },
 		{ "lhist",	OP4,		0 },
 		{ "max",	MOP1,		B_AT_MF_MAX },
 		{ "min",	MOP1,		B_AT_MF_MIN },
