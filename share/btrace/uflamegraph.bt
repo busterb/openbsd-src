@@ -1,0 +1,25 @@
+/*	$OpenBSD$	*/
+
+/*
+ * uflamegraph.bt	Live userland CPU flame graph, refreshed every 5 seconds.
+ *
+ * Samples the call stack of the given process at 97Hz and renders a rolling
+ * flame graph.  The process must be compiled with -fno-omit-frame-pointer
+ * for stack unwinding to work.
+ *
+ * Usage:
+ *	btrace -j /usr/share/btrace/uflamegraph.bt $pid | bviz
+ */
+
+profile:hz:97 / pid == $1 / {
+	@[ustack] = count();
+}
+
+interval:s:5 {
+	print(@);
+	clear(@);
+}
+
+END {
+	clear(@);
+}

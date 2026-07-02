@@ -1,0 +1,24 @@
+/*	$OpenBSD$	*/
+
+/*
+ * kflamegraph.bt	Live kernel CPU flame graph, refreshed every 5 seconds.
+ *
+ * Samples the kernel call stack at 97Hz and renders a rolling flame graph.
+ * Each 5-second window shows where CPU time is currently being spent.
+ *
+ * Usage:
+ *	btrace -j /usr/share/btrace/kflamegraph.bt | bviz
+ */
+
+profile:hz:97 {
+	@[kstack] = count();
+}
+
+interval:s:5 {
+	print(@);
+	clear(@);
+}
+
+END {
+	clear(@);
+}
