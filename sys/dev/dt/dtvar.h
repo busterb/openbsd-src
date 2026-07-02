@@ -223,6 +223,9 @@ struct dt_probe {
 	int			 dtp_type;	/* [I] 'entry' or 'return' */
 	vaddr_t			 dtp_addr;	/* [I] address of breakpoint */
 	SLIST_ENTRY(dt_probe)	 dtp_knext;	/* [K] list of ELF kprobe */
+#ifdef __aarch64__
+	uint32_t		 dtp_savedinsn;	/* [I] original instruction word (arm64) */
+#endif
 #endif
 };
 
@@ -249,6 +252,9 @@ int		 dt_prov_syscall_init(void);
 int		 dt_prov_static_init(void);
 int		 dt_prov_kprobe_init(void);
 int		 dt_prov_bkpt_hook(struct trapframe *);
+#ifdef __aarch64__
+extern uint32_t	 dt_prov_bkpt_savedinsn[];
+#endif
 
 struct dt_probe *dt_dev_alloc_probe(const char *, const char *,
 		    struct dt_provider *);
