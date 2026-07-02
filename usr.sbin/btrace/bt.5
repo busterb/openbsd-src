@@ -22,6 +22,9 @@
 .Nd Bug Tracing language
 .Sh SYNTAX
 .D1 Ar probe Ic \&/ Ar filter Ic \&/ \&{ Ar action Ic \&}
+.Pp
+Multiple probes may share a single clause by separating them with commas:
+.D1 Ar probe1 Ic \&, Ar probe2 Ic \&/ Ar filter Ic \&/ \&{ Ar action Ic \&}
 .Sh DESCRIPTION
 The
 .Nm
@@ -581,6 +584,21 @@ When the map is printed, all three are displayed on one line.
 .It "@map[key]" = Fn sum "value"
 Store the sum of all recorded values for
 .Va key .
+.El
+.Pp
+Comments:
+.Bl -tag -width "/* ... */" -compact -offset indent
+.It Li //
+Line comment: everything from
+.Li //
+to the end of the line is ignored.
+.It Li /* No ... Ic */
+Block comment: everything between
+.Li /*
+and
+.Li */
+is ignored.
+Block comments may span multiple lines.
 .El
 .Sh EXAMPLES
 Working examples are installed in

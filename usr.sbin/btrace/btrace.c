@@ -2267,6 +2267,13 @@ stmt_clear(struct bt_stmt *bs)
 	assert(bs->bs_var == NULL);
 	assert(ba->ba_type == B_AT_VAR);
 
+	if (bv->bv_type == B_VT_LONG || bv->bv_type == B_VT_STR ||
+	    bv->bv_type == B_VT_TUPLE) {
+		bv->bv_value = NULL;
+		debug("var '%s' clear\n", bv_name(bv));
+		return;
+	}
+
 	map = (struct map *)bv->bv_value;
 	if (map == NULL)
 		return;
@@ -2447,7 +2454,7 @@ stmt_print(struct bt_stmt *bs, struct dt_evt *dtev)
 		map_hist_print(map, bv_name(bv));
 		bv->bv_printed = 1;
 	} else
-		printf("%s\n", ba2str(ba, dtev));
+		printf("@%s: %s\n", bv_name(bv), ba2str(ba, dtev));
 }
 
 /*
@@ -2641,6 +2648,14 @@ stmt_zero(struct bt_stmt *bs)
 
 	assert(bs->bs_var == NULL);
 	assert(ba->ba_type == B_AT_VAR);
+
+	if (bv->bv_type == B_VT_LONG || bv->bv_type == B_VT_STR ||
+	    bv->bv_type == B_VT_TUPLE) {
+		bv->bv_value = ba_new(0, B_AT_LONG);
+		bv->bv_type = B_VT_LONG;
+		debug("var '%s' zero\n", bv_name(bv));
+		return;
+	}
 
 	map = (struct map *)bv->bv_value;
 	if (map == NULL)
