@@ -17,7 +17,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#if defined(DDBPROF) && (defined(__amd64__) || defined(__i386__))
+#if defined(__amd64__) || defined(__i386__)
 
 #include <sys/types.h>
 #include <sys/systm.h>
@@ -39,9 +39,7 @@
 
 extern db_symtab_t	db_symtab;
 extern char		__kutext_end[];
-extern int		db_prof_on;
 
-extern void	db_prof_count(struct trapframe *);
 extern vaddr_t	db_get_probe_addr(struct trapframe *);
 
 /* Lists of probes per ELF symbol. */
@@ -50,7 +48,6 @@ SLIST_HEAD(, dt_probe) *dtpf_return;
 
 int	dt_prov_kprobe_alloc(struct dt_probe *, struct dt_softc *,
 	    struct dt_pcb_list *, struct dtioc_req *);
-int	dt_prov_kprobe_hook(struct dt_provider *, ...);
 int	dt_prov_kprobe_dealloc(struct dt_probe *, struct dt_softc *,
 	    struct dtioc_req *);
 
@@ -59,7 +56,7 @@ int	dt_prov_kprobe_dealloc(struct dt_probe *, struct dt_softc *,
 struct dt_provider dt_prov_kprobe = {
 	.dtpv_name    = "kprobe",
 	.dtpv_alloc   = dt_prov_kprobe_alloc,
-	.dtpv_enter   = dt_prov_kprobe_hook,
+	.dtpv_enter   = NULL,
 	.dtpv_leave   = NULL,
 	.dtpv_dealloc = dt_prov_kprobe_dealloc,
 };
@@ -543,34 +540,32 @@ dt_prov_kprobe_dealloc(struct dt_probe *dtp, struct dt_softc *sc,
 	return 0;
 }
 
+/*
+ * Breakpoint hook called directly from the int3 trap handler.
+ *
+ * Return values (consumed by the trap handler for instruction emulation):
+ *   0 - not a dt breakpoint; fall through to normal trap handling
+ *   1 - entry probe fired (emulate the patched prologue instruction)
+ *   2 - return probe fired (emulate the patched ret instruction)
+ */
 int
-dt_prov_kprobe_hook(struct dt_provider *dtpv, ...)
+dt_prov_bkpt_hook(struct trapframe *tf)
 {
 	struct dt_probe *dtp;
 	struct dt_pcb *dp;
-	struct trapframe *tf;
-	va_list ap;
 	int is_dt_bkpt = 0;
-	int error;	/* Return values for return probes*/
-	vaddr_t *args, addr;
-	size_t argsize;
-	register_t retval[2];
-
-	KASSERT(dtpv == &dt_prov_kprobe);
-
-	va_start(ap, dtpv);
-	tf = va_arg(ap, struct trapframe*);
-	va_end(ap);
+	vaddr_t addr;
 
 	addr = db_get_probe_addr(tf);
+
+	if (dtpf_entry == NULL)
+		return 0;
 
 	SLIST_FOREACH(dtp, &dtpf_entry[INSTTOIDX(addr)], dtp_knext) {
 		if (dtp->dtp_addr != addr)
 			continue;
 
 		is_dt_bkpt = 1;
-		if (db_prof_on)
-			db_prof_count(tf);
 
 		if (!dtp->dtp_recording)
 			continue;
@@ -583,18 +578,34 @@ dt_prov_kprobe_hook(struct dt_provider *dtpv, ...)
 			if (dtev == NULL)
 				continue;
 
+			if (ISSET(dp->dp_evtflags, DTEVT_FUNCARGS)) {
 #if defined(__amd64__)
-			args = (vaddr_t *)tf->tf_rdi;
-			/* XXX: use CTF to get the number of arguments. */
-			argsize = 6;
+				/*
+				 * SysV AMD64 ABI: first 6 integer/pointer
+				 * arguments passed in registers.
+				 */
+				dtev->dtev_args[0] = tf->tf_rdi;
+				dtev->dtev_args[1] = tf->tf_rsi;
+				dtev->dtev_args[2] = tf->tf_rdx;
+				dtev->dtev_args[3] = tf->tf_rcx;
+				dtev->dtev_args[4] = tf->tf_r8;
+				dtev->dtev_args[5] = tf->tf_r9;
 #elif defined(__i386__)
-			/* All args on stack */
-			args = (vaddr_t *)(tf->tf_esp + 4);
-			argsize = 10;
-#endif
+				/*
+				 * On i386 kernel-mode traps (no ring change),
+				 * hardware does not push ESP/SS.  tf_esp
+				 * overlaps the return address and tf_ss
+				 * overlaps the first argument.  Use
+				 * &tf->tf_ss as the argument base.
+				 */
+				register_t *sargs;
+				int i;
 
-			if (ISSET(dp->dp_evtflags, DTEVT_FUNCARGS))
-				memcpy(dtev->dtev_args, args, argsize);
+				sargs = (register_t *)&tf->tf_ss;
+				for (i = 0; i < DTMAXFUNCARGS; i++)
+					dtev->dtev_args[i] = sargs[i];
+#endif
+			}
 
 			dt_pcb_ring_consume(dp, dtev);
 		}
@@ -622,18 +633,12 @@ dt_prov_kprobe_hook(struct dt_provider *dtpv, ...)
 				continue;
 
 #if defined(__amd64__)
-			retval[0] = tf->tf_rax;
-			retval[1] = 0;
-			error = 0;
-#elif defined(__i386)
-			retval[0] = tf->tf_eax;
-			retval[1] = 0;
-			error = 0;
+			dtev->dtev_retval[0] = tf->tf_rax;
+#elif defined(__i386__)
+			dtev->dtev_retval[0] = tf->tf_eax;
 #endif
-
-			dtev->dtev_retval[0] = retval[0];
-			dtev->dtev_retval[1] = retval[1];
-			dtev->dtev_error = error;
+			dtev->dtev_retval[1] = 0;
+			dtev->dtev_error = 0;
 
 			dt_pcb_ring_consume(dp, dtev);
 		}
@@ -648,6 +653,9 @@ dt_prov_kprobe_patch_all_entry(void)
 {
 	struct dt_probe *dtp;
 	size_t i;
+
+	if (dtpf_entry == NULL)
+		return;
 
 	for (i = 0; i < PPTMASK; ++i) {
 		SLIST_FOREACH(dtp, &dtpf_entry[i], dtp_knext) {
@@ -667,6 +675,9 @@ dt_prov_kprobe_depatch_all_entry(void)
 	struct dt_probe *dtp;
 	size_t i;
 
+	if (dtpf_entry == NULL)
+		return;
+
 	for (i = 0; i < PPTMASK; ++i) {
 		SLIST_FOREACH(dtp, &dtpf_entry[i], dtp_knext) {
 			dtp->dtp_ref--;
@@ -678,4 +689,22 @@ dt_prov_kprobe_depatch_all_entry(void)
 
 	}
 }
+#endif /* __amd64__ || __i386__ */
+
+#else /* !defined(__amd64__) && !defined(__i386__) */
+
+struct trapframe;
+
+int
+dt_prov_kprobe_init(void)
+{
+	return 0;
+}
+
+int
+dt_prov_bkpt_hook(struct trapframe *tf)
+{
+	return -1;
+}
+
 #endif /* __amd64__ || __i386__ */

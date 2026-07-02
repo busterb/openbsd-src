@@ -248,6 +248,7 @@ int		 dt_prov_profile_init(void);
 int		 dt_prov_syscall_init(void);
 int		 dt_prov_static_init(void);
 int		 dt_prov_kprobe_init(void);
+int		 dt_prov_bkpt_hook(struct trapframe *);
 
 struct dt_probe *dt_dev_alloc_probe(const char *, const char *,
 		    struct dt_provider *);
