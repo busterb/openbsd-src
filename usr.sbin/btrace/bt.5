@@ -219,16 +219,26 @@ is executed and the contents of all non-empty maps are printed.
 Increment the bucket corresponding to
 .Va value
 in a power-of-two histogram.
+Used as
+.Ql \&@ = hist(value)
+for a scalar histogram, or
+.Ql \&@map[key] = hist(value)
+for a per-key histogram.
 .It Fn lhist "value" "min" "max" "step"
 Increment the bucket corresponding to
 .Va value
-in the linear histogram spawning between the positive value
+in the linear histogram spanning between the positive value
 .Va min
 and
 .Va max
 with buckets of
 .Va step
 size.
+Used as
+.Ql \&@ = lhist(value, min, max, step)
+for a scalar histogram, or
+.Ql \&@map[key] = lhist(value, min, max, step)
+for a per-key histogram.
 .It Fn print "@map"
 Print all pairs from
 .Va @map .
@@ -301,16 +311,54 @@ to 0.
 .Pp
 The following functions only work on a specific map entry.
 .Bl -tag -width "lhist(value, min, max, step)"
+.It Ic for Pq Ar $var : Ar @map No block
+Iterate over all entries of
+.Ar @map ,
+executing
+.Ar block
+once per entry.
+The loop variable
+.Ar $var
+is bound to a
+.Pq Ar key , Ar value
+tuple for each entry:
+.Ar $var.0
+is the key as a string and
+.Ar $var.1
+is the aggregated value.
+Only maps with scalar aggregation values
+.Pq count , sum , min , max , avg , stats
+may be iterated.
+.It "@map[key]" = Fn avg "value"
+Store the running average of all recorded values for
+.Va key .
+When the map is printed, the computed average is displayed.
 .It "@map[key]" = Fn count
 Increase the stored value for
 .Va key
 by one.
+.It "@map[key]" = Fn hist "value"
+Increment the power-of-two histogram bucket corresponding to
+.Va value
+for
+.Va key .
+When the map is printed, a separate histogram is displayed for each key.
+.It "@map[key]" = Fn lhist "value" "min" "max" "step"
+Increment the linear histogram bucket corresponding to
+.Va value
+for
+.Va key .
+When the map is printed, a separate histogram is displayed for each key.
 .It "@map[key]" = Fn max "value"
 Store the maximum recorded value for
 .Va key .
 .It "@map[key]" = Fn min "value"
 Store the minimum recorded value for
 .Va key .
+.It "@map[key]" = Fn stats "value"
+Store the count, average, and total sum of all recorded values for
+.Va key .
+When the map is printed, all three are displayed on one line.
 .It "@map[key]" = Fn sum "value"
 Store the sum of all recorded values for
 .Va key .

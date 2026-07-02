@@ -62,6 +62,10 @@ void			 map_zero(struct map *);
 struct hist		*hist_new(long);
 void			 hist_increment(struct hist *, const char *);
 void			 hist_print(struct hist *, const char *);
+void			 map_foreach(struct map *, int (*)(const char *,
+			    struct bt_arg *, void *), void *);
+void			 map_hist_bucket(struct map *, const char *, const char *, long);
+void			 map_hist_print(struct map *, const char *);
 
 #define KLEN	1024	/* # of characters in map key, contain a stack trace */
 #define STRLEN	1024	/* maximum # of bytes to output via str() function */

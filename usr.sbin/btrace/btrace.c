@@ -51,6 +51,22 @@
 #define MINIMUM(a, b)	(((a) < (b)) ? (a) : (b))
 #define MAXIMUM(a, b)	(((a) > (b)) ? (a) : (b))
 
+/* Per-key state for avg() and stats() aggregations. */
+struct avgstate {
+	long		 count;
+	long		 sum;
+};
+
+/*
+ * Combined allocation: bt_arg header immediately followed by avgstate.
+ * ba.ba_value points to the embedded state field, so freeing ba also
+ * frees the state without a separate allocation.
+ */
+struct bt_avg {
+	struct bt_arg	 ba;
+	struct avgstate	 state;
+};
+
 /*
  * Maximum number of operands an arithmetic operation can have.  This
  * is necessary to stop infinite recursion when evaluating expressions.
@@ -105,6 +121,8 @@ void			 fill_memcap(struct bt_stmt *, struct dtioc_probe_info *,
 			     struct dtioc_req *);
 int			 stmt_eval(struct bt_stmt *, struct dt_evt *);
 void			 stmt_bucketize(struct bt_stmt *, struct dt_evt *);
+void			 stmt_map_bucketize(struct bt_stmt *, struct dt_evt *);
+int			 stmt_map_foreach(struct bt_stmt *, struct dt_evt *);
 void			 stmt_clear(struct bt_stmt *);
 void			 stmt_delete(struct bt_stmt *, struct dt_evt *);
 void			 stmt_insert(struct bt_stmt *, struct dt_evt *);
@@ -588,6 +606,7 @@ rules_action_scan(struct bt_stmt *bs)
 		switch (bs->bs_act) {
 		case B_AC_BUCKETIZE:
 		case B_AC_INSERT:
+		case B_AC_MAPHIST:
 			ba = (struct bt_arg *)bs->bs_var;
 			evtflags |= ba2dtflags(ba);
 			break;
@@ -598,6 +617,12 @@ rules_action_scan(struct bt_stmt *bs)
 				evtflags |= rules_action_scan(bc->bc_elsebs);
 			}
 			break;
+		case B_AC_FORMAP: {
+			struct bt_for *bfor = (struct bt_for *)bs->bs_var;
+			if (bfor != NULL)
+				evtflags |= rules_action_scan(bfor->bfor_body);
+			break;
+		}
 		default:
 			break;
 		}
@@ -661,6 +686,7 @@ rules_strargs_scan(struct bt_stmt *bs)
 		switch (bs->bs_act) {
 		case B_AC_BUCKETIZE:
 		case B_AC_INSERT:
+		case B_AC_MAPHIST:
 			ba = (struct bt_arg *)bs->bs_var;
 			mask |= ba2strargs(ba);
 			break;
@@ -671,6 +697,12 @@ rules_strargs_scan(struct bt_stmt *bs)
 				mask |= rules_strargs_scan(bc->bc_elsebs);
 			}
 			break;
+		case B_AC_FORMAP: {
+			struct bt_for *bfor = (struct bt_for *)bs->bs_var;
+			if (bfor != NULL)
+				mask |= rules_strargs_scan(bfor->bfor_body);
+			break;
+		}
 		default:
 			break;
 		}
@@ -759,6 +791,7 @@ rules_strlen_scan(struct bt_stmt *bs)
 		switch (bs->bs_act) {
 		case B_AC_BUCKETIZE:
 		case B_AC_INSERT:
+		case B_AC_MAPHIST:
 			ba = (struct bt_arg *)bs->bs_var;
 			l = ba_strlen(ba);
 			if (l > maxlen)
@@ -775,6 +808,15 @@ rules_strlen_scan(struct bt_stmt *bs)
 					maxlen = l;
 			}
 			break;
+		case B_AC_FORMAP: {
+			struct bt_for *bfor = (struct bt_for *)bs->bs_var;
+			if (bfor != NULL) {
+				l = rules_strlen_scan(bfor->bfor_body);
+				if (l > maxlen)
+					maxlen = l;
+			}
+			break;
+		}
 		default:
 			break;
 		}
@@ -1061,12 +1103,16 @@ rule_printmaps(struct bt_rule *r)
 		struct bt_arg *ba;
 
 		SLIST_FOREACH(ba, &bs->bs_args, ba_next) {
-			struct bt_var *bv = ba->ba_value;
+			struct bt_var *bv;
 			struct map *map;
 
 			if (ba->ba_type != B_AT_MAP && ba->ba_type != B_AT_HIST)
 				continue;
+			/* B_AT_HIST sentinel used by B_AC_MAPHIST has NULL value */
+			if (ba->ba_value == NULL)
+				continue;
 
+			bv = ba->ba_value;
 			map = (struct map *)bv->bv_value;
 			if (map == NULL)
 				continue;
@@ -1075,7 +1121,9 @@ rule_printmaps(struct bt_rule *r)
 			if (bv->bv_printed)
 				continue;
 
-			if (ba->ba_type == B_AT_MAP)
+			if (bv->bv_type == B_VT_MAPHIST)
+				map_hist_print(map, bv_name(bv));
+			else if (ba->ba_type == B_AT_MAP)
 				map_print(map, SIZE_T_MAX, bv_name(bv));
 			else
 				hist_print((struct hist *)map, bv_name(bv));
@@ -1564,6 +1612,7 @@ fill_memcap(struct bt_stmt *bs, struct dtioc_probe_info *dtpi,
 		switch (bs->bs_act) {
 		case B_AC_BUCKETIZE:
 		case B_AC_INSERT:
+		case B_AC_MAPHIST:
 			ba = (struct bt_arg *)bs->bs_var;
 			ba_fill_deref(ba, dtpi, dtrq);
 			break;
@@ -1574,6 +1623,12 @@ fill_memcap(struct bt_stmt *bs, struct dtioc_probe_info *dtpi,
 				fill_memcap(bc->bc_elsebs, dtpi, dtrq);
 			}
 			break;
+		case B_AC_FORMAP: {
+			struct bt_for *bfor = (struct bt_for *)bs->bs_var;
+			if (bfor != NULL)
+				fill_memcap(bfor->bfor_body, dtpi, dtrq);
+			break;
+		}
 		default:
 			break;
 		}
@@ -1595,6 +1650,11 @@ stmt_eval(struct bt_stmt *bs, struct dt_evt *dtev)
 	case B_AC_BUCKETIZE:
 		stmt_bucketize(bs, dtev);
 		break;
+	case B_AC_MAPHIST:
+		stmt_map_bucketize(bs, dtev);
+		break;
+	case B_AC_FORMAP:
+		return stmt_map_foreach(bs, dtev);
 	case B_AC_CLEAR:
 		stmt_clear(bs);
 		break;
@@ -1684,6 +1744,122 @@ stmt_bucketize(struct bt_stmt *bs, struct dt_evt *dtev)
 	bv->bv_printed = 0;
 }
 
+/*
+ * Keyed histogram insert:	{ @map[key] = hist(val); }
+ *				{ @map[key] = lhist(val, min, max, step); }
+ */
+void
+stmt_map_bucketize(struct bt_stmt *bs, struct dt_evt *dtev)
+{
+	struct bt_arg *bmap = SLIST_FIRST(&bs->bs_args);
+	struct bt_arg *bhist = SLIST_NEXT(bmap, ba_next);
+	struct bt_arg *bval = (struct bt_arg *)bs->bs_var;
+	struct bt_var *bv = bmap->ba_value;
+	struct bt_arg *brange;
+	struct map *map;
+	const char *mhash, *bucket;
+	long step = 0;
+
+	assert(bmap->ba_type == B_AT_MAP);
+	assert(bhist->ba_type == B_AT_HIST);
+	assert(SLIST_NEXT(bval, ba_next) == NULL);
+
+	brange = bhist->ba_key;
+	mhash = ba2hash(bmap->ba_key, dtev);
+	bucket = ba2bucket(bval, brange, dtev, &step);
+	if (bucket == NULL) {
+		debug("maphist '%s'[%s] value=%lu out of range\n",
+		    bv_name(bv), mhash, ba2long(bval, dtev));
+		return;
+	}
+
+	map = (struct map *)bv->bv_value;
+	if (map == NULL) {
+		map = map_new();
+		bv->bv_value = (struct bt_arg *)map;
+		bv->bv_type = B_VT_MAPHIST;
+		bv->bv_printed = 0;
+	}
+
+	map_hist_bucket(map, mhash, bucket, step);
+	debug("maphist '%s'[%s] bucket '%s'\n", bv_name(bv), mhash, bucket);
+}
+
+/*
+ * Callback state for stmt_map_foreach.
+ */
+struct foreach_state {
+	struct bt_for	*fs_bfor;
+	struct dt_evt	*fs_dtev;
+	struct bt_arg	 fs_key_ba;	/* B_AT_STR: current entry's key */
+	struct bt_arg	 fs_tuple_ba;	/* B_AT_TUPLE: (key, value) pair */
+	int		 fs_halt;	/* non-zero if body called exit() */
+};
+
+static int
+foreach_cb(const char *key, struct bt_arg *val, void *arg)
+{
+	struct foreach_state *st = arg;
+	struct bt_stmt *body;
+
+	st->fs_key_ba.ba_value = (void *)key;
+	SLIST_NEXT(&st->fs_key_ba, ba_next) = val;
+
+	body = st->fs_bfor->bfor_body;
+	while (body != NULL) {
+		if (stmt_eval(body, st->fs_dtev)) {
+			st->fs_halt = 1;
+			return 1;	/* stop iteration */
+		}
+		body = SLIST_NEXT(body, bs_next);
+	}
+	return 0;
+}
+
+/*
+ * For-loop over a map:	{ for ($kv : @map) { } }
+ *
+ * Binds the loop variable to a (key, value) tuple for each map entry and
+ * executes the body.  $kv.0 is the key string; $kv.1 is the stored value.
+ * Returns non-zero if a body statement requested a halt (e.g. exit()).
+ */
+int
+stmt_map_foreach(struct bt_stmt *bs, struct dt_evt *dtev)
+{
+	struct bt_for *bfor = (struct bt_for *)bs->bs_var;
+	struct bt_arg *mapref = SLIST_FIRST(&bs->bs_args);
+	struct bt_var *mapvar = mapref->ba_value;
+	struct map *map;
+	struct foreach_state st;
+
+	assert(mapref->ba_type == B_AT_VAR);
+	assert(bfor != NULL);
+
+	map = (struct map *)mapvar->bv_value;
+	if (map == NULL || mapvar->bv_type != B_VT_MAP)
+		return 0;
+
+	/*
+	 * Build a reusable (key, value) tuple.
+	 * fs_key_ba:   B_AT_STR pointing at each entry's key string in turn.
+	 * fs_tuple_ba: B_AT_TUPLE with fs_key_ba as the element list head.
+	 * foreach_cb updates fs_key_ba.ba_value and ba_next per iteration.
+	 */
+	st.fs_bfor  = bfor;
+	st.fs_dtev  = dtev;
+	st.fs_halt  = 0;
+	st.fs_key_ba   = (struct bt_arg)BA_INITIALIZER(NULL, B_AT_STR);
+	st.fs_tuple_ba = (struct bt_arg)BA_INITIALIZER(&st.fs_key_ba, B_AT_TUPLE);
+
+	bfor->bfor_var->bv_value = &st.fs_tuple_ba;
+	bfor->bfor_var->bv_type  = B_VT_TUPLE;
+
+	map_foreach(map, foreach_cb, &st);
+
+	bfor->bfor_var->bv_value = NULL;
+	bfor->bfor_var->bv_type  = B_VT_LONG;
+	return st.fs_halt;
+}
 
 /*
  * Empty a map:		{ clear(@map); }
@@ -1702,7 +1878,8 @@ stmt_clear(struct bt_stmt *bs)
 	if (map == NULL)
 		return;
 
-	if (bv->bv_type != B_VT_MAP && bv->bv_type != B_VT_HIST)
+	if (bv->bv_type != B_VT_MAP && bv->bv_type != B_VT_HIST &&
+	    bv->bv_type != B_VT_MAPHIST)
 		errx(1, "invalid variable type for clear(%s)", ba_name(ba));
 
 	map_clear(map);
@@ -1766,7 +1943,7 @@ stmt_insert(struct bt_stmt *bs, struct dt_evt *dtev)
 	if (map == NULL)
 		map = map_new();
 
-	/* Operate on existring value for count(), max(), min() and sum(). */
+	/* Operate on existing value for count(), max(), min() and sum(). */
 	switch (bval->ba_type) {
 	case B_AT_MF_COUNT:
 		val = ba2long(map_get(map, hash), NULL);
@@ -1788,12 +1965,40 @@ stmt_insert(struct bt_stmt *bs, struct dt_evt *dtev)
 		val += ba2long(bval->ba_value, dtev);
 		bval = ba_new(val, B_AT_LONG);
 		break;
+	case B_AT_MF_AVG:
+	case B_AT_MF_STATS: {
+		struct bt_arg *cur = map_get(map, hash);
+		struct avgstate *as;
+		long sample = ba2long(bval->ba_value, dtev);
+		enum bt_argtype type = bval->ba_type;
+
+		if (cur->ba_type == B_AT_MF_AVG ||
+		    cur->ba_type == B_AT_MF_STATS) {
+			/* Update state in place; skip map_insert. */
+			as = (struct avgstate *)cur->ba_value;
+			as->count++;
+			as->sum += sample;
+			bval = NULL;
+		} else {
+			/* First insertion for this key. */
+			struct bt_avg *bav = calloc(1, sizeof(*bav));
+			if (bav == NULL)
+				err(1, "avg: calloc");
+			bav->ba.ba_type = type;
+			bav->ba.ba_value = &bav->state;
+			bav->state.count = 1;
+			bav->state.sum = sample;
+			bval = &bav->ba;
+		}
+		break;
+	}
 	default:
 		bval = baeval(bval, dtev);
 		break;
 	}
 
-	map_insert(map, hash, bval);
+	if (bval != NULL)
+		map_insert(map, hash, bval);
 
 	debug("map=%p '%s' insert key=%p '%s' bval=%p\n", map,
 	    bv_name(bv), bkey, hash, bval);
@@ -1844,6 +2049,9 @@ stmt_print(struct bt_stmt *bs, struct dt_evt *dtev)
 		bv->bv_printed = 1;
 	} else if (bv->bv_type == B_VT_HIST) {
 		hist_print((struct hist *)map, bv_name(bv));
+		bv->bv_printed = 1;
+	} else if (bv->bv_type == B_VT_MAPHIST) {
+		map_hist_print(map, bv_name(bv));
 		bv->bv_printed = 1;
 	} else
 		printf("%s\n", ba2str(ba, dtev));
@@ -2027,7 +2235,8 @@ stmt_zero(struct bt_stmt *bs)
 	if (map == NULL)
 		return;
 
-	if (bv->bv_type != B_VT_MAP && bv->bv_type != B_VT_HIST)
+	if (bv->bv_type != B_VT_MAP && bv->bv_type != B_VT_HIST &&
+	    bv->bv_type != B_VT_MAPHIST)
 		errx(1, "invalid variable type for zero(%s)", ba_name(ba));
 
 	map_zero(map);
@@ -2505,6 +2714,27 @@ ba2long(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_OP_PLUS ... B_AT_OP_LOR:
 		val = baexpr2long(ba, dtev);
 		break;
+	case B_AT_MF_AVG:
+	case B_AT_MF_STATS: {
+		struct avgstate *as = (struct avgstate *)ba->ba_value;
+		val = (as->count > 0) ? as->sum / as->count : 0;
+		break;
+	}
+	case B_AT_TMEMBER: {
+		unsigned long idx = (unsigned long)ba->ba_key;
+		struct bt_arg *elem;
+
+		bv = ba->ba_value;
+		if (bv->bv_value == NULL)
+			return 0;
+		elem = bv->bv_value;
+		assert(elem->ba_type == B_AT_TUPLE);
+		elem = elem->ba_value;
+		while (elem != NULL && idx-- > 0)
+			elem = SLIST_NEXT(elem, ba_next);
+		val = (elem != NULL) ? ba2long(elem, dtev) : 0;
+		break;
+	}
 	default:
 		xabort("no long conversion for type %d", ba->ba_type);
 	}
@@ -2666,6 +2896,21 @@ ba2str(struct bt_arg *ba, struct dt_evt *dtev)
 	case B_AT_MF_SUM:
 		assert(0);
 		break;
+	case B_AT_MF_AVG: {
+		struct avgstate *as = (struct avgstate *)ba->ba_value;
+		long avg = (as->count > 0) ? as->sum / as->count : 0;
+		snprintf(buf, sizeof(buf), "%ld", avg);
+		str = buf;
+		break;
+	}
+	case B_AT_MF_STATS: {
+		struct avgstate *as = (struct avgstate *)ba->ba_value;
+		long avg = (as->count > 0) ? as->sum / as->count : 0;
+		snprintf(buf, sizeof(buf), "count %ld, avg %ld, total %ld",
+		    as->count, avg, as->sum);
+		str = buf;
+		break;
+	}
 	default:
 		xabort("no string conversion for type %d", ba->ba_type);
 	}
@@ -2712,9 +2957,14 @@ ba2flags(struct bt_arg *ba)
 	case B_AT_BI_PROBE:
 		break;
 	case B_AT_MF_COUNT:
+		break;
 	case B_AT_MF_MAX:
 	case B_AT_MF_MIN:
 	case B_AT_MF_SUM:
+	case B_AT_MF_AVG:
+	case B_AT_MF_STATS:
+		if (ba->ba_value != NULL)
+			flags |= ba2dtflags(ba->ba_value);
 		break;
 	case B_AT_FN_STR: {
 		struct bt_arg *inner = (struct bt_arg *)ba->ba_value;
@@ -2781,6 +3031,8 @@ bacmp(struct bt_arg *a, struct bt_arg *b)
 
 	switch (a->ba_type) {
 	case B_AT_LONG:
+	case B_AT_MF_AVG:
+	case B_AT_MF_STATS:
 		return ba2long(a, NULL) - ba2long(b, NULL);
 	case B_AT_STR:
 		strlcpy(astr, ba2str(a, NULL), sizeof(astr));

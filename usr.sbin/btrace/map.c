@@ -177,6 +177,25 @@ map_print(struct map *map, size_t top, const char *name)
 	free(elms);
 }
 
+/*
+ * Iterate all entries in the map in key order, calling cb(key, val, arg)
+ * for each.  If cb returns non-zero, iteration stops early.
+ */
+void
+map_foreach(struct map *map, int (*cb)(const char *, struct bt_arg *, void *),
+    void *arg)
+{
+	struct mentry *mep;
+
+	if (map == NULL)
+		return;
+
+	RB_FOREACH(mep, map, map) {
+		if (cb(mep->mkey, mep->mval, arg))
+			break;
+	}
+}
+
 void
 map_zero(struct map *map)
 {
@@ -297,8 +316,8 @@ hist_print_bucket(char *buf, size_t buflen, long long upb, long long hstep)
 	return l;
 }
 
-void
-hist_print(struct hist *hist, const char *name)
+static void
+hist_print_inner(struct hist *hist, const char *header)
 {
 	struct map *map = &hist->hmap;
 	static char buf[80];
@@ -316,7 +335,7 @@ hist_print(struct hist *hist, const char *name)
 		if (val > max)
 			max = val;
 	}
-	printf("@%s:\n", name);
+	printf("%s:\n", header);
 
 	/*
 	 * Sort by ascending key.
@@ -347,5 +366,55 @@ hist_print(struct hist *hist, const char *name)
 		printf("%s\n", buf);
 
 		bprev = bin;
+	}
+}
+
+void
+hist_print(struct hist *hist, const char *name)
+{
+	char header[KLEN + 2];
+
+	snprintf(header, sizeof(header), "@%s", name);
+	hist_print_inner(hist, header);
+}
+
+/*
+ * Increment the bucket for 'key' in the per-slot histogram.
+ * Creates a new hist for 'key' on first use.
+ */
+void
+map_hist_bucket(struct map *map, const char *key, const char *bucket, long step)
+{
+	struct mentry *mep;
+	struct hist *hist;
+
+	mep = mget(map, key);
+	hist = (struct hist *)mep->mval;
+	if (hist == NULL) {
+		hist = hist_new(step);
+		mep->mval = (struct bt_arg *)hist;
+	}
+	hist_increment(hist, bucket);
+}
+
+/*
+ * Print all per-key histograms in the map, in key order.
+ */
+void
+map_hist_print(struct map *map, const char *name)
+{
+	struct mentry *mep;
+	char header[KLEN + KLEN + 4];
+
+	if (map == NULL)
+		return;
+
+	RB_FOREACH(mep, map, map) {
+		struct hist *hist = (struct hist *)mep->mval;
+
+		if (hist == NULL)
+			continue;
+		snprintf(header, sizeof(header), "@%s[%s]", name, mep->mkey);
+		hist_print_inner(hist, header);
 	}
 }

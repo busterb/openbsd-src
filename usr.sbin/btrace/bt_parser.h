@@ -108,6 +108,7 @@ struct bt_var {
 		B_VT_TUPLE,
 		B_VT_MAP,
 		B_VT_HIST,
+		B_VT_MAPHIST,		/* @map[key] = hist(val) */
 	}			 bv_type;
 	int			 bv_printed;	/* was explicitly printed */
 };
@@ -162,6 +163,8 @@ struct bt_arg {
 		B_AT_MF_MAX,			/* @map[key] = max(nsecs) */
 		B_AT_MF_MIN,			/* @map[key] = min(pid) */
 		B_AT_MF_SUM,			/* @map[key] = sum(@elapsed) */
+		B_AT_MF_AVG,			/* @map[key] = avg(nsecs) */
+		B_AT_MF_STATS,			/* @map[key] = stats(nsecs) */
 
 		B_AT_OP_PLUS,
 		B_AT_OP_MINUS,
@@ -216,6 +219,14 @@ struct bt_cond {
 };
 
 /*
+ * Represents a for-loop over a map: for ($kv : @map) { }
+ */
+struct bt_for {
+	struct bt_var		*bfor_var;	/* loop variable ($kv) */
+	struct bt_stmt		*bfor_body;	/* body executed per entry */
+};
+
+/*
  * Each action associated with a given probe is made of at least one
  * statement.
  *
@@ -231,7 +242,9 @@ struct bt_stmt {
 		B_AC_CLEAR,			/* clear(@map) */
 		B_AC_DELETE,			/* delete(@map[key]) */
 		B_AC_EXIT,			/* exit() */
+		B_AC_FORMAP,			/* for ($kv : @map) { } */
 		B_AC_INSERT,			/* @map[key] = 42 */
+		B_AC_MAPHIST,			/* @map[key] = hist(val) */
 		B_AC_PRINT,			/* print(@map, 10) */
 		B_AC_PRINTF,			/* printf("hello!\n") */
 		B_AC_STORE,			/* @a = 3 */

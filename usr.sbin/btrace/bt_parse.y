@@ -84,6 +84,8 @@ struct bt_stmt	*bm_insert(const char *, struct bt_arg *, struct bt_arg *);
 struct bt_stmt	*bm_op(enum bt_action, struct bt_arg *, struct bt_arg *);
 
 struct bt_stmt	*bh_inc(const char *, struct bt_arg *, struct bt_arg *);
+struct bt_stmt	*bhm_inc(const char *, struct bt_arg *, struct bt_arg *, struct bt_arg *);
+struct bt_stmt	*bfor_new(const char *, const char *, struct bt_stmt *);
 
 /*
  * Lexer
@@ -119,7 +121,7 @@ static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 %token	<v.i>		ERROR ENDFILT
 %token	<v.i>		OP_EQ OP_NE OP_LE OP_LT OP_GE OP_GT OP_LAND OP_LOR OP_ARROW
 /* Builtins */
-%token	<v.i>		BUILTIN BEGIN ELSE END IF STR
+%token	<v.i>		BUILTIN BEGIN ELSE END FOR IF STR
 /* Functions and Map operators */
 %token  <v.i>		F_DELETE F_PRINT
 %token	<v.i>		MFUNC FUNC0 FUNC1 FUNCN OP1 OP2 OP4 MOP0 MOP1
@@ -248,11 +250,14 @@ stmt	: ';' NL			{ $$ = NULL; }
 	| F_PRINT '(' pargs ')'		{ $$ = bs_new($1, $3, NULL); }
 	| GVAR '=' OP1 '(' expr ')'	{ $$ = bh_inc($1, $5, NULL); }
 	| GVAR '=' OP4 '(' expr ',' vargs ')'	{ $$ = bh_inc($1, $5, $7); }
+	| GVAR '[' vargs ']' '=' OP1 '(' expr ')'		{ $$ = bhm_inc($1, $3, $8, NULL); }
+	| GVAR '[' vargs ']' '=' OP4 '(' expr ',' vargs ')'	{ $$ = bhm_inc($1, $3, $8, $10); }
 	;
 
 stmtblck: IF '(' expr ')' block			{ $$ = bt_new($3, $5, NULL); }
 	| IF '(' expr ')' block ELSE block	{ $$ = bt_new($3, $5, $7); }
 	| IF '(' expr ')' block ELSE stmtblck	{ $$ = bt_new($3, $5, $7); }
+	| FOR '(' LVAR ':' GVAR ')' block	{ $$ = bfor_new($3, $5, $7); }
 	;
 
 stmtlist: stmtlist stmtblck		{ $$ = bs_append($1, $2); }
@@ -755,6 +760,85 @@ bh_inc(const char *hname, struct bt_arg *hval, struct bt_arg *hrange)
 	return bs_new(B_AC_BUCKETIZE, ba, (struct bt_var *)hval);
 }
 
+/*
+ * Keyed histogram: @map[key] = hist(val) or @map[key] = lhist(val, min, max, step)
+ */
+struct bt_stmt *
+bhm_inc(const char *mname, struct bt_arg *mkey, struct bt_arg *hval,
+    struct bt_arg *hrange)
+{
+	struct bt_arg *bmap, *bhist;
+	struct bt_stmt *bs;
+
+	if (hrange != NULL) {
+		struct bt_arg *ba;
+		long min = 0, max;
+		int count = 0;
+
+		for (ba = hrange; ba != NULL; ba = SLIST_NEXT(ba, ba_next)) {
+			if (++count > 3)
+				yyerror("too many arguments");
+			if (ba->ba_type != B_AT_LONG)
+				yyerror("type invalid");
+			switch (count) {
+			case 1:
+				min = (long)ba->ba_value;
+				if (min >= 0)
+					break;
+				yyerror("negative minimum");
+			case 2:
+				max = (long)ba->ba_value;
+				if (max > min)
+					break;
+				yyerror("maximum smaller than minimum (%d < %d)",
+				    max, min);
+			case 3:
+				break;
+			default:
+				assert(0);
+			}
+		}
+		if (count < 3)
+			yyerror("%d missing arguments", 3 - count);
+	}
+
+	bmap = bm_find(mname, mkey);
+	bhist = ba_new(NULL, B_AT_HIST);	/* sentinel: ba_value=NULL, ba_key=range */
+	bhist->ba_key = hrange;
+	bs = bs_new(B_AC_MAPHIST, bmap, (struct bt_var *)hval);
+	ba_append(bmap, bhist);
+	return bs;
+}
+
+/*
+ * For-loop over a map:	for ($kv : @map) { }
+ *
+ * Each iteration binds $kv to a (key, value) tuple for one map entry.
+ * $kv.0 is the key string; $kv.1 is the aggregated value.
+ */
+struct bt_stmt *
+bfor_new(const char *varname, const char *mapname, struct bt_stmt *body)
+{
+	struct bt_var *lvar;
+	struct bt_for *bfor;
+	struct bt_arg *mapref;
+
+	lvar = bl_lookup(varname);
+	if (lvar == NULL) {
+		lvar = bv_new(varname);
+		SLIST_INSERT_HEAD(&l_variables, lvar, bv_next);
+	}
+
+	bfor = calloc(1, sizeof(*bfor));
+	if (bfor == NULL)
+		err(1, "bfor: calloc");
+	bfor->bfor_var = lvar;
+	bfor->bfor_body = body;
+
+	mapref = ba_new(bg_get(mapname), B_AT_VAR);
+	return bs_new(B_AC_FORMAP, mapref, (struct bt_var *)bfor);
+}
+
 struct keyword {
 	const char	*word;
 	int		 token;
@@ -783,6 +867,7 @@ lookup(char *s)
 		{ "arg7",	BUILTIN,	B_AT_BI_ARG7 },
 		{ "arg8",	BUILTIN,	B_AT_BI_ARG8 },
 		{ "arg9",	BUILTIN,	B_AT_BI_ARG9 },
+		{ "avg",	MOP1,		B_AT_MF_AVG },
 		{ "clear",	MFUNC,		B_AC_CLEAR },
 		{ "comm",	BUILTIN,	B_AT_BI_COMM },
 		{ "count",	MOP0, 		B_AT_MF_COUNT },
@@ -790,6 +875,7 @@ lookup(char *s)
 		{ "delete",	F_DELETE,	B_AC_DELETE },
 		{ "else",	ELSE,		0 },
 		{ "exit",	FUNC0,		B_AC_EXIT },
+		{ "for",	FOR,		0 },
 		{ "gid",	BUILTIN,	B_AT_BI_GID },
 		{ "hist",	OP1,		0 },
 		{ "if",		IF,		0 },
@@ -803,6 +889,7 @@ lookup(char *s)
 		{ "printf",	FUNCN,		B_AC_PRINTF },
 		{ "probe",	BUILTIN,	B_AT_BI_PROBE },
 		{ "retval",	BUILTIN,	B_AT_BI_RETVAL },
+		{ "stats",	MOP1,		B_AT_MF_STATS },
 		{ "str",	STR,		B_AT_FN_STR },
 		{ "sum",	MOP1,		B_AT_MF_SUM },
 		{ "tid",	BUILTIN,	B_AT_BI_TID },
