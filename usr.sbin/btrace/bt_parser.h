@@ -158,6 +158,7 @@ struct bt_arg {
 
 		B_AT_FN_STR,			/* str(arg0); str($1, 3); */
 		B_AT_FN_DEREF,			/* arg0->field: struct member deref */
+		B_AT_FN_SUBSCRIPT,		/* arg0[N]: array element read */
 
 		B_AT_MF_COUNT,			/* @map[key] = count() */
 		B_AT_MF_MAX,			/* @map[key] = max(nsecs) */
@@ -211,6 +212,26 @@ struct bt_deref {
 #define BD_SLOT_UNSET	0xff		/* bd_slot sentinel: not yet assigned */
 
 /*
+ * Array subscript node: arg0[N] or (arg0->field)[N].
+ *
+ * bss_base is the base expression: a B_AT_BI_ARGx builtin, a B_AT_FN_DEREF
+ * node, or a B_AT_FN_SUBSCRIPT node (for chained subscripts like arg0[i][j]).
+ * bss_index is the constant (non-negative) element index.
+ * bss_stride, bss_typeid, and bss_slot are filled at setup time in btrace.c
+ * when CTF type information is resolved per-probe.
+ * bss_slot is the index into dtev_mem[] where the captured value is stored.
+ */
+struct bt_subscript {
+	struct bt_arg		*bss_base;	/* argN, deref, or subscript */
+	long			 bss_index;	/* constant element index */
+	uint32_t		 bss_stride;	/* element size in bytes */
+	uint16_t		 bss_typeid;	/* CTF type ID of element */
+	uint8_t			 bss_slot;	/* dtev_mem output slot */
+};
+
+#define BSS_SLOT_UNSET	0xff		/* bss_slot sentinel: not yet assigned */
+
+/*
  * Represents branches of an if-else statement.
  */
 struct bt_cond {
@@ -224,6 +245,13 @@ struct bt_cond {
 struct bt_for {
 	struct bt_var		*bfor_var;	/* loop variable ($kv) */
 	struct bt_stmt		*bfor_body;	/* body executed per entry */
+};
+
+/*
+ * Represents a while-loop: while (expr) { }
+ */
+struct bt_while {
+	struct bt_stmt		*bwh_body;	/* body executed while true */
 };
 
 /*
@@ -250,6 +278,7 @@ struct bt_stmt {
 		B_AC_STORE,			/* @a = 3 */
 		B_AC_TEST,			/* if (@a) */
 		B_AC_TIME,			/* time("%H:%M:%S  ") */
+		B_AC_WHILE,			/* while (expr) { } */
 		B_AC_ZERO,			/* zero(@map) */
 	}			 bs_act;
 };
@@ -264,6 +293,7 @@ int			 btparse(const char *, size_t, const char *, int);
 #define ba_new(v, t)	 ba_new0((void *)(v), (t))
 struct bt_arg		*ba_new0(void *, enum bt_argtype);
 struct bt_arg		*bd_new(struct bt_arg *, const char *);
+struct bt_arg		*bsub_new(struct bt_arg *, long);
 
 const char		*bv_name(struct bt_var *);
 
