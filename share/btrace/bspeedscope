@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+#
+# bspeedscope - convert btrace stack profiles to speedscope format
+#
+# Reads NDJSON from btrace -j output and writes a speedscope-format JSON
+# to stdout.  By default emits one accumulated profile per named map (or per
+# CPU/label when the map uses compound keys).  With --per-interval, also
+# emits one profile per btrace interval so you can review how the profile
+# changed over time.
+#
+# Usage:
+#   btrace -j script.bt | bspeedscope > profile.speedscope
+#   btrace -j kcpuflamegraph.bt | bspeedscope > per-cpu.speedscope
+#   btrace -j kflamegraph.bt | bspeedscope --per-interval --merge 10 > out.speedscope
+#
+# Open the result at https://speedscope.app
+#
+# Options:
+#   --per-interval  Also emit one profile per interval (or merged group).
+#                   Without this flag only accumulated totals are written.
+#   --merge N       Combine every N intervals into one profile (default: 1).
+#                   Only meaningful with --per-interval.
+#   --min-count N   Drop stacks with fewer than N total samples in a profile
+#                   (default: 1).  Reduces file size for long traces.
+
+import json
+import sys
+import time
+
+
+def _parse_stack(key_str):
+    """
+    Parse a btrace kstack/ustack key into a list of frame names,
+    outermost (root-ward) first.
+
+    btrace formats each frame as '\\nfuncname+0xOFFSET'; the final frame
+    is '\\nkernel\\n' or '\\nuserland\\n'.  We strip offsets and reverse so
+    the outermost frame comes first (root at top of the icicle chart).
+    """
+    frames = []
+    for f in key_str.split('\n'):
+        f = f.strip()
+        if not f:
+            continue
+        plus = f.find('+')
+        if plus > 0:
+            f = f[:plus]
+        frames.append(f)
+    frames.reverse()
+    return frames
+
+
+def _make_profile(name, data, start_ms, end_ms, frame_index, frames, min_count):
+    """Build one speedscope sampled profile entry."""
+    # Collect (parsed_names, count) pairs first so we can sort by name.
+    # Sorting by frame name sequence groups stacks with the same root
+    # functions together, giving speedscope's time-ordered view a proper
+    # flame graph shape instead of a scattered barcode.
+    stacks = []
+    for key_str, count in data.items():
+        count = int(count)
+        if count < min_count:
+            continue
+        parsed = _parse_stack(key_str)
+        if parsed:
+            stacks.append((parsed, count))
+
+    stacks.sort(key=lambda pc: pc[0])
+
+    samples = []
+    weights = []
+    for parsed, count in stacks:
+        indices = []
+        for fname in parsed:
+            if fname not in frame_index:
+                frame_index[fname] = len(frames)
+                frames.append({'name': fname})
+            indices.append(frame_index[fname])
+        samples.append(indices)
+        weights.append(count)
+
+    total = sum(weights)
+    # endValue must be > startValue; fall back to startValue + sample count.
+    if end_ms <= start_ms:
+        end_ms = start_ms + total
+
+    return {
+        'type': 'sampled',
+        'name': name,
+        'unit': 'milliseconds',
+        'startValue': start_ms,
+        'endValue': end_ms,
+        'samples': samples,
+        'weights': weights,
+    }
+
+
+def _split_compound_key(key):
+    """
+    Split a btrace compound map key into (label, stack_str).
+
+    When btrace aggregates with multiple keys, e.g. @[cpu, kstack], it
+    formats the map key as ba2hash() does: components joined by ', '.
+    Because kstack strings always start with '\\n', the boundary between
+    the non-stack prefix and the stack is the last occurrence of ', \\n'.
+
+    Returns (label, stack_str) on success, or (None, key) if the key
+    does not contain a stack component.
+
+    Examples:
+      "0, \\nfunc+0x10\\nkernel\\n"        -> ("0",       "\\nfunc+0x10\\nkernel\\n")
+      "0, nginx, \\nfunc+0x10\\nkernel\\n" -> ("0, nginx","\\nfunc+0x10\\nkernel\\n")
+      "\\nfunc+0x10\\nkernel\\n"            -> (None, key)   plain stack, no label
+    """
+    idx = key.rfind(', \n')
+    if idx <= 0:
+        return None, key
+    return key[:idx], key[idx + 2:]
+
+
+def _maphist_to_stacks(data):
+    """
+    Convert maphist data {stack_str: {bucket: count}} to {stack_str: count}
+    by summing all histogram bucket counts per stack.  Skips outer keys that
+    are not stack traces (i.e. do not contain '\\n').
+
+    This handles scripts like:
+        @[kstack] = hist(latency_ns);
+    where the outer keys are call stacks and the histogram represents a
+    distribution of measured values per stack.
+    """
+    result = {}
+    for key, buckets in data.items():
+        if '\n' not in key:
+            continue
+        total = sum(int(v) for v in buckets.values())
+        if total > 0:
+            result[key] = total
+    return result
+
+
+def _ts_label(ts):
+    return time.strftime('%H:%M:%S', time.localtime(ts))
+
+
+def _to_speedscope(buckets, accumulated, per_interval, min_count):
+    """
+    Build a speedscope JSON dict.
+
+    buckets      - list of {'label': str, 'start_ms': int, 'end_ms': int,
+                            'maps': {map_name: {stack_str: count}}}
+    accumulated  - {map_name: {stack_str: total_count}}
+    per_interval - if True, prepend one profile per bucket before the totals
+    """
+    frame_index = {}
+    frames = []
+    profiles = []
+
+    if per_interval:
+        for b in buckets:
+            for map_name, data in sorted(b['maps'].items()):
+                if not data:
+                    continue
+                pname = f'{map_name} [{b["label"]}]'
+                profiles.append(_make_profile(
+                    pname, data,
+                    b['start_ms'], b['end_ms'],
+                    frame_index, frames, min_count))
+
+    # Accumulated totals always included; active index points here.
+    active    = len(profiles)
+    acc_start = buckets[0]['start_ms'] if buckets else 0
+    acc_end   = buckets[-1]['end_ms']  if buckets else 0
+    for map_name, data in sorted(accumulated.items()):
+        if not data:
+            continue
+        profiles.append(_make_profile(
+            f'{map_name} [total]', data,
+            acc_start, acc_end,
+            frame_index, frames, 1))
+
+    return {
+        '$schema': 'https://www.speedscope.app/file-format-schema.json',
+        'shared': {'frames': frames},
+        'profiles': profiles,
+        'name': 'btrace profile',
+        'activeProfileIndex': active,
+        'exporter': 'bspeedscope',
+    }
+
+
+def main():
+    merge_n      = 1
+    min_count    = 1
+    per_interval = False
+
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == '--per-interval':
+            per_interval = True
+            i += 1
+        elif args[i] == '--merge' and i + 1 < len(args):
+            merge_n = int(args[i + 1])
+            i += 2
+        elif args[i] == '--min-count' and i + 1 < len(args):
+            min_count = int(args[i + 1])
+            i += 2
+        elif args[i] in ('-h', '--help'):
+            print(__doc__)
+            sys.exit(0)
+        else:
+            print(f'bspeedscope: unknown option {args[i]}', file=sys.stderr)
+            sys.exit(1)
+
+    # intervals: ordered list of {'ts', 'maps': {name: {stack: count}}}
+    intervals   = []
+    accumulated = {}
+    cur_ts      = None
+    cur_maps    = None
+
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                print(line, file=sys.stderr)
+                continue
+
+            t    = obj.get('type')
+            name = obj.get('name', '?')
+            ts   = obj.get('ts', 0)
+            raw  = obj.get('data', {})
+
+            if t == 'map':
+                # map: {stack_str: count} — only if keys are stack traces
+                if not raw or not any('\n' in k for k in raw):
+                    continue
+                data = {k: int(v) for k, v in raw.items()}
+            elif t == 'maphist':
+                # maphist: {stack_str: {bucket: count}} — outer keys are stacks
+                data = _maphist_to_stacks(raw)
+                if not data:
+                    continue
+            else:
+                continue
+
+            # New timestamp signals a new btrace interval.
+            if ts != cur_ts:
+                cur_ts   = ts
+                cur_maps = {}
+                intervals.append({'ts': ts, 'maps': cur_maps})
+
+            # Check whether keys are compound ("label, \nframes...").
+            # If so, split into per-label sub-maps so each label becomes
+            # its own speedscope profile (e.g. one profile per CPU).
+            sample_key = next(iter(data))
+            label, _ = _split_compound_key(sample_key)
+
+            if label is not None:
+                labeled = {}
+                for k, v in data.items():
+                    lbl, stk = _split_compound_key(k)
+                    if lbl is None:
+                        lbl = ''
+                    sub = labeled.setdefault(lbl, {})
+                    sub[stk] = sub.get(stk, 0) + v
+                for lbl, sub in labeled.items():
+                    sname = f'{name}[{lbl}]'
+                    bucket = cur_maps.setdefault(sname, {})
+                    for k, v in sub.items():
+                        bucket[k] = bucket.get(k, 0) + v
+                    acc = accumulated.setdefault(sname, {})
+                    for k, v in sub.items():
+                        acc[k] = acc.get(k, 0) + v
+            else:
+                bucket = cur_maps.setdefault(name, {})
+                for k, v in data.items():
+                    bucket[k] = bucket.get(k, 0) + v
+                acc = accumulated.setdefault(name, {})
+                for k, v in data.items():
+                    acc[k] = acc.get(k, 0) + v
+
+    except KeyboardInterrupt:
+        pass
+
+    if not accumulated:
+        print('bspeedscope: no stack data found', file=sys.stderr)
+        sys.exit(1)
+
+    # Group intervals into buckets of merge_n each.
+    buckets = []
+    for i in range(0, len(intervals), merge_n):
+        group = intervals[i:i + merge_n]
+        ts0   = group[0]['ts']
+        ts1   = group[-1]['ts']
+        # Try to use the next group's start as end_ms for clean boundaries.
+        next_start = intervals[i + merge_n]['ts'] if i + merge_n < len(intervals) else None
+
+        if merge_n == 1:
+            label = _ts_label(ts0)
+        else:
+            label = f'{_ts_label(ts0)}–{_ts_label(ts1)}'
+
+        # Merge maps across intervals in this group.
+        merged_maps = {}
+        for iv in group:
+            for map_name, data in iv['maps'].items():
+                m = merged_maps.setdefault(map_name, {})
+                for k, v in data.items():
+                    m[k] = m.get(k, 0) + v
+
+        start_ms = int(ts0 * 1000)
+        end_ms   = int((next_start or ts1) * 1000)
+        buckets.append({
+            'label':    label,
+            'start_ms': start_ms,
+            'end_ms':   end_ms,
+            'maps':     merged_maps,
+        })
+
+    json.dump(_to_speedscope(buckets, accumulated, per_interval, min_count), sys.stdout,
+              separators=(',', ':'))
+    sys.stdout.write('\n')
+    sys.stdout.flush()
+
+
+if __name__ == '__main__':
+    main()

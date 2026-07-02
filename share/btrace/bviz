@@ -14,6 +14,8 @@
 #   map      @map[key] = count()  -> bar chart sorted by value
 #   map      @map[kstack] = count() -> vertical icicle chart (root left,
 #                                      depth right, height ∝ sample count)
+#
+# For speedscope flame graph output, use bspeedscope.
 
 import json
 import os
@@ -145,8 +147,8 @@ def _parse_stack(key_str):
     Parse a btrace kstack/ustack key into a list of frame names,
     outermost (root-ward) first.
 
-    btrace formats each frame as '\nfuncname+0xOFFSET'; the final
-    frame is '\nkernel\n' or '\nuserland\n'.  We strip offsets and
+    btrace formats each frame as '\\nfuncname+0xOFFSET'; the final
+    frame is '\\nkernel\\n' or '\\nuserland\\n'.  We strip offsets and
     reverse so the outermost frame comes first (root at top in the
     icicle chart).
     """
@@ -369,42 +371,42 @@ def render_map(obj):
 
 
 def main():
-    # sections: name -> last received JSON object
+    print(CLEAR, end='', flush=True)
     sections = {}
 
-    print(CLEAR, end='', flush=True)
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                print(line, file=sys.stderr)
+                continue
 
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            # Pass through non-JSON lines (e.g. printf output) to stderr
-            print(line, file=sys.stderr)
-            continue
+            name = obj.get('name', '?')
+            t    = obj.get('type')
 
-        name = obj.get('name', '?')
-        sections[name] = obj
+            sections[name] = obj
 
-        # Redraw all sections from top
-        print(CLEAR, end='')
-        for n, o in sections.items():
-            t = o.get('type')
-            if t == 'maphist':
-                render_maphist(o)
-            elif t == 'hist':
-                render_hist(o)
-            elif t == 'map':
-                render_map(o)
-            print()
-        sys.stdout.flush()
+            print(CLEAR, end='')
+            for n, o in sections.items():
+                ot = o.get('type')
+                if ot == 'maphist':
+                    render_maphist(o)
+                elif ot == 'hist':
+                    render_hist(o)
+                elif ot == 'map':
+                    render_map(o)
+                print()
+            sys.stdout.flush()
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print(RESET)
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        print(RESET)
-        sys.exit(0)
+    main()

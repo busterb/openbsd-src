@@ -1,0 +1,27 @@
+/*	$OpenBSD$	*/
+
+/*
+ * kcpuflamegraph.bt	Per-CPU kernel flame graph, refreshed every 5 seconds.
+ *
+ * Like kflamegraph.bt but keys stacks by CPU number so that each core
+ * produces a separate flame graph.  Use with bspeedscope to get one
+ * speedscope profile per CPU:
+ *
+ *	btrace -j /usr/share/btrace/kcpuflamegraph.bt | bspeedscope > out.speedscope
+ *
+ * bspeedscope splits compound [cpu, kstack] keys automatically, producing
+ * profiles named "@[0]", "@[1]", etc. — one per CPU number.
+ */
+
+profile:hz:97 {
+	@cpu[cpu, kstack] = count();
+}
+
+interval:s:5 {
+	print(@cpu);
+	clear(@cpu);
+}
+
+END {
+	clear(@cpu);
+}
