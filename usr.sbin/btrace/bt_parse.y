@@ -127,7 +127,7 @@ static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 %expect 2
 
 %token	<v.i>		ERROR ENDFILT
-%token	<v.i>		OP_EQ OP_NE OP_LE OP_LT OP_GE OP_GT OP_LAND OP_LOR OP_ARROW
+%token	<v.i>		OP_EQ OP_NE OP_LE OP_LT OP_GE OP_GT OP_LAND OP_LOR OP_SHL OP_SHR OP_ARROW
 /* Builtins */
 %token	<v.i>		BUILTIN BEGIN BREAK CONTINUE ELSE END FOR IF STR WHILE
 /* Functions and Map operators */
@@ -142,7 +142,7 @@ static int 	 beflag = 0;		/* BEGIN/END parsing context flag */
 %type	<v.filter>	filter
 %type	<v.stmt>	action stmt stmtblck stmtlist block
 %type	<v.arg>		vargs mentry mpat pargs
-%type	<v.arg>		expr term fterm variable factor func
+%type	<v.arg>		expr term fterm uterm variable factor func
 %%
 
 grammar	: /* empty */
@@ -182,10 +182,12 @@ filter	: /* empty */			{ $$ = NULL; }
 	;
 
 /*
- * Give higher precedence to:
- *  1. && and ||
- *  2. ==, !=, <<, <, >=, >, +, =, &, ^, |
- *  3. *, /, %
+ * Operator precedence (lowest to highest):
+ *  1. &&, ||
+ *  2. ==, !=, <, <=, >=, >
+ *  3. +, -, &, ^, |, <<, >>
+ *  4. *, /, %
+ *  5. unary !, ~, - (highest)
  */
 expr	: expr OP_LAND term	{ $$ = ba_op(B_AT_OP_LAND, $1, $3); }
 	| expr OP_LOR term	{ $$ = ba_op(B_AT_OP_LOR, $1, $3); }
@@ -203,12 +205,20 @@ term	: term OP_EQ fterm	{ $$ = ba_op(B_AT_OP_EQ, $1, $3); }
 	| term '&' fterm	{ $$ = ba_op(B_AT_OP_BAND, $1, $3); }
 	| term '^' fterm	{ $$ = ba_op(B_AT_OP_XOR, $1, $3); }
 	| term '|' fterm	{ $$ = ba_op(B_AT_OP_BOR, $1, $3); }
+	| term OP_SHL fterm	{ $$ = ba_op(B_AT_OP_SHL, $1, $3); }
+	| term OP_SHR fterm	{ $$ = ba_op(B_AT_OP_SHR, $1, $3); }
 	| fterm
 	;
 
-fterm	: fterm '*' factor	{ $$ = ba_op(B_AT_OP_MULT, $1, $3); }
-	| fterm '/' factor	{ $$ = ba_op(B_AT_OP_DIVIDE, $1, $3); }
-	| fterm '%' factor	{ $$ = ba_op(B_AT_OP_MODULO, $1, $3); }
+fterm	: fterm '*' uterm	{ $$ = ba_op(B_AT_OP_MULT, $1, $3); }
+	| fterm '/' uterm	{ $$ = ba_op(B_AT_OP_DIVIDE, $1, $3); }
+	| fterm '%' uterm	{ $$ = ba_op(B_AT_OP_MODULO, $1, $3); }
+	| uterm
+	;
+
+uterm	: '!' uterm		{ $$ = ba_new($2, B_AT_OP_LNOT); }
+	| '~' uterm		{ $$ = ba_new($2, B_AT_OP_BNOT); }
+	| '-' uterm		{ $$ = ba_new($2, B_AT_OP_NEG); }
 	| factor
 	;
 
@@ -1082,17 +1092,27 @@ again:
 		}
 		return c;
 	case '<':
+		if (peek() == '<') {
+			lgetc();
+			return OP_SHL;
+		}
 		if (peek() == '=') {
 			lgetc();
 			return OP_LE;
 		}
 		return OP_LT;
 	case '>':
+		if (peek() == '>') {
+			lgetc();
+			return OP_SHR;
+		}
 		if (peek() == '=') {
 			lgetc();
 			return OP_GE;
 		}
 		return OP_GT;
+	case '~':
+		return c;
 	case '&':
 		if (peek() == '&') {
 			lgetc();

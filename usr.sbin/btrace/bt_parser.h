@@ -183,6 +183,12 @@ struct bt_arg {
 		B_AT_OP_GT,
 		B_AT_OP_LAND,
 		B_AT_OP_LOR,
+
+		B_AT_OP_LNOT,			/* !expr */
+		B_AT_OP_BNOT,			/* ~expr */
+		B_AT_OP_NEG,			/* -expr (unary) */
+		B_AT_OP_SHL,			/* << */
+		B_AT_OP_SHR,			/* >> */
 	}			 ba_type;
 };
 
