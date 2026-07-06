@@ -47,7 +47,7 @@
 #include <dev/dt/dt_prov_kprobe_common.h>
 
 extern db_symtab_t	db_symtab;
-extern char		etext[];
+extern char		__cptext_start[];
 
 extern vaddr_t	db_get_probe_addr(struct trapframe *);
 
@@ -190,9 +190,15 @@ dt_prov_kprobe_init(void)
 		size = symp->st_size;
 		name = strtab + symp->st_name;
 
-		/* Skip functions not mapped in kernel text. */
+		/*
+		 * Skip functions not mapped in kernel text.  The bound is
+		 * __cptext_start, not etext: the .cptext section between
+		 * them holds the codepatch application code, which is
+		 * unmapped via pmap_kremove() once boot-time patching is
+		 * done (see codepatch.c), so probing it would fault.
+		 */
 		if (funcaddr < KERNBASE ||
-		    funcaddr >= (vaddr_t)&etext) {
+		    funcaddr >= (vaddr_t)&__cptext_start) {
 			nskip_text++;
 			continue;
 		}
