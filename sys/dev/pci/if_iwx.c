@@ -12671,6 +12671,7 @@ iwx_attach(struct device *parent, struct device *self, void *aux)
 
 	ifp->if_softc = sc;
 	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
+	ifp->if_xflags = IFXF_MBUF_64BIT;
 	ifp->if_ioctl = iwx_ioctl;
 	ifp->if_start = iwx_start;
 	ifp->if_watchdog = iwx_watchdog;
