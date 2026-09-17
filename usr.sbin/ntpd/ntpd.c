@@ -275,12 +275,7 @@ main(int argc, char *argv[])
 	signal(SIGINT, sighdlr);
 	signal(SIGHUP, sighdlr);
 
-	/*
-	 * We keep no per-constraint state of our own: constraints are
-	 * driven by the ntp engine and handled by the persistent
-	 * constraint engine, and we merely relay imsgs between the two.
-	 * This just frees the constraints we parsed for auto_preconditions().
-	 */
+	/* frees the constraints we parsed only for auto_preconditions() */
 	constraint_purge();
 
 	if ((ibuf = malloc(sizeof(struct imsgbuf))) == NULL)
@@ -293,9 +288,7 @@ main(int argc, char *argv[])
 	if (imsgbuf_init(ibuf_cstr, pipe_cstr[0]) == -1)
 		fatal(NULL);
 
-	/*
-	 * Both children are forked above; we never exec again from here on.
-	 */
+	/* no exec after this point */
 	if (pledge("stdio settime", NULL) == -1)
 		err(1, "pledge");
 
@@ -387,10 +380,8 @@ check_child(void)
 	pid_t	 pid;
 
 	/*
-	 * Just reap zombies.  Neither the ntp engine nor the constraint
-	 * engine is tracked individually here: if either dies, its pipe to
-	 * us goes away and the main loop above notices via dispatch_imsg()
-	 * / priv_constraint_dispatch() returning -1, which shuts ntpd down.
+	 * Just reap zombies; a dead child is noticed via its pipe closing
+	 * (dispatch_imsg() / priv_constraint_dispatch() returning -1).
 	 */
 	do {
 		pid = waitpid(WAIT_ANY, &status, WNOHANG);

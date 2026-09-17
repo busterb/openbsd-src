@@ -57,32 +57,54 @@ int	 constraint_close(u_int32_t);
 void	 constraint_update(void);
 int	 constraint_cmp(const void *, const void *);
 
-struct httpsdate *
-	 httpsdate_init(const char *, const char *, const char *,
-	    const char *, const u_int8_t *, size_t, int);
-void	 httpsdate_free(void *);
-int	 httpsdate_request(struct httpsdate *, struct timeval *, int);
-void	*httpsdate_query(const char *, const char *, const char *,
-	    const char *, const u_int8_t *, size_t,
-	    struct timeval *, struct timeval *, int);
-
-char	*tls_readline(struct tls *, size_t *, size_t *, struct timeval *);
-
 u_int constraint_cnt;
 extern u_int peer_cnt;
 extern struct imsgbuf *ibuf;		/* priv */
 extern struct imsgbuf *ibuf_main;	/* chld */
 
-struct httpsdate {
-	char			*tls_addr;
-	char			*tls_port;
-	char			*tls_hostname;
-	char			*tls_path;
-	char			*tls_request;
+/*
+ * A single in-flight constraint query: an asynchronous, non-blocking HTTPS
+ * "Date:" fetch driven by cstr_conn_progress() from the engine's poll(2)
+ * loop.
+ */
+struct cstr_conn {
+	TAILQ_ENTRY(cstr_conn)	 entry;
+	uint32_t		 id;
+	int			 fd;		/* non-blocking socket */
+	struct tls		*ctx;
 	struct tls_config	*tls_config;
-	struct tls		*tls_ctx;
-	struct tm		 tls_tm;
+	enum {
+		CSTR_CONNECTING,
+		CSTR_HANDSHAKE,
+		CSTR_WRITE,
+		CSTR_READ
+	}			 state;
+	short			 want;		/* POLLIN or POLLOUT */
+	time_t			 deadline;	/* getmonotime() + timeout */
+	char			*hostname;	/* SNI / cert name */
+	char			*request;	/* HTTP HEAD request */
+	size_t			 reqlen, reqoff;
+	char			 rbuf[CONSTRAINT_MAXHEADERLENGTH];
+	size_t			 rlen;
+	struct timeval		 when;		/* Date: rx timestamp */
+	struct tm		 tm;		/* parsed Date: */
+	int			 synced;
+	char			 addr[NI_MAXHOST];	/* numeric, for logs */
 };
+TAILQ_HEAD(cstr_conns, cstr_conn);
+
+static struct cstr_conns cstr_conns = TAILQ_HEAD_INITIALIZER(cstr_conns);
+static uint8_t		 *cstr_ca;
+static size_t		  cstr_ca_len;
+
+static void	cstr_conn_free(struct cstr_conn *);
+static void	cstr_conn_fail(struct imsgbuf *, struct cstr_conn *);
+static void	cstr_conn_finish(struct imsgbuf *, struct cstr_conn *);
+static int	cstr_conn_scan_date(struct cstr_conn *);
+static void	cstr_conn_progress(struct imsgbuf *, struct cstr_conn *);
+static void	cstr_conn_start(struct imsgbuf *, uint32_t, struct ntp_addr *,
+		    const char *, const char *, int);
+static int	cstr_dispatch_imsg(struct imsgbuf *);
 
 int
 constraint_init(struct constraint *cstr)
@@ -214,19 +236,12 @@ constraint_query(struct constraint *cstr, int synced)
 	return (0);
 }
 
-/*
- * priv parent's pipe to the persistent constraint engine.  Set up once in
- * ntpd.c right after the engine is forked, alongside `ibuf' (the pipe to
- * the ntp engine).
- */
-extern struct imsgbuf	*ibuf_cstr;	/* priv -> constraint engine */
+/* priv parent's pipe to the constraint engine; set up in ntpd.c */
+extern struct imsgbuf	*ibuf_cstr;
 
 /*
- * The priv parent no longer parses constraint queries or results: it just
- * relays IMSG_CONSTRAINT_QUERY from the ntp engine to the (single,
- * persistent) constraint engine, and IMSG_CONSTRAINT_RESULT / _CLOSE back.
- * There is nothing left to track per constraint on this side, so unlike the
- * old per-query fork+exec design, this never touches conf->constraints.
+ * Relay IMSG_CONSTRAINT_QUERY from the ntp engine to the constraint engine,
+ * and IMSG_CONSTRAINT_RESULT / _CLOSE back, verbatim and unparsed.
  */
 int
 priv_constraint_dispatch(void)
@@ -260,146 +275,451 @@ priv_constraint_dispatch(void)
 	return (0);
 }
 
-static int
-imsgbuf_read_one(struct imsgbuf *imsgbuf, struct imsg *imsg)
-{
-	while (1) {
-		switch (imsgbuf_get(imsgbuf, imsg)) {
-		case -1:
-			return (-1);
-		case 0:
-			break;
-		default:
-			return (1);
-		}
-
-		switch (imsgbuf_read(imsgbuf)) {
-		case -1:
-			return (-1);
-		case 0:
-			return (0);
-		}
-	}
-}
-
-/*
- * A single query read off the pipe from the priv parent, fully parsed and
- * owned by the caller.  Used by the (now persistent) constraint engine.
- */
-struct cstr_query {
-	uint32_t	 id;
-	struct ntp_addr	*addr;
-	char		*name;
-	char		*path;
-	int		 synced;
-};
-
-static void
-cstr_query_free(struct cstr_query *q)
-{
-	free(q->addr);
-	free(q->name);
-	free(q->path);
-}
-
-/*
- * Block for the next IMSG_CONSTRAINT_QUERY and parse it into *q.
- * Returns 1 on success (caller must cstr_query_free(q) when done),
- * 0 on a malformed message (q->id is still valid, nothing to free),
- * -1 if the pipe to the parent is gone (caller should shut down).
- */
-static int
-cstr_read_query(struct imsgbuf *ib, struct cstr_query *q)
-{
-	struct imsg		 imsg;
-	struct ntp_addr_msg	 am;
-	uint8_t			*data;
-	size_t			 mlen;
-
-	switch (imsgbuf_read_one(ib, &imsg)) {
-	case -1:
-	case 0:
-		return (-1);
-	}
-
-	memset(q, 0, sizeof(*q));
-
-	if (imsg.hdr.type != IMSG_CONSTRAINT_QUERY) {
-		log_warnx("%s: unexpected imsg type", __func__);
-		imsg_free(&imsg);
-		return (0);
-	}
-	q->id = imsg.hdr.peerid;
-
-	mlen = imsg.hdr.len - IMSG_HEADER_SIZE;
-	if (mlen < sizeof(am)) {
-		log_warnx("%s: short IMSG_CONSTRAINT_QUERY", __func__);
-		imsg_free(&imsg);
-		return (0);
-	}
-	memcpy(&am, imsg.data, sizeof(am));
-	if (mlen != sizeof(am) + am.namelen + am.pathlen) {
-		log_warnx("%s: malformed IMSG_CONSTRAINT_QUERY", __func__);
-		imsg_free(&imsg);
-		return (0);
-	}
-	q->synced = am.synced;
-
-	if ((q->addr = calloc(1, sizeof(*q->addr))) == NULL)
-		fatal("calloc");
-	memcpy(q->addr, &am.a, sizeof(*q->addr));
-	q->addr->next = NULL;
-
-	data = (uint8_t *)imsg.data + sizeof(am);
-	if (am.namelen) {
-		if ((q->name = get_string(data, am.namelen)) == NULL) {
-			log_warnx("invalid IMSG_CONSTRAINT_QUERY name");
-			cstr_query_free(q);
-			imsg_free(&imsg);
-			return (0);
-		}
-		data += am.namelen;
-	}
-	if (am.pathlen) {
-		if ((q->path = get_string(data, am.pathlen)) == NULL) {
-			log_warnx("invalid IMSG_CONSTRAINT_QUERY path");
-			cstr_query_free(q);
-			imsg_free(&imsg);
-			return (0);
-		}
-	}
-
-	imsg_free(&imsg);
-	return (1);
-}
-
 static void
 cstr_send_close(struct imsgbuf *ib, uint32_t id)
 {
 	int fail = 1;
 
+	/* Queue only; the engine's poll loop writes it out. */
 	if (imsg_compose(ib, IMSG_CONSTRAINT_CLOSE, id, 0, -1, &fail,
 	    sizeof(fail)) == -1)
 		fatal("%s: imsg_compose", __func__);
-	if (imsgbuf_flush(ib) == -1)
-		fatal("imsgbuf_flush");
+}
+
+static void
+cstr_conn_free(struct cstr_conn *cc)
+{
+	if (cc->ctx != NULL)
+		tls_close(cc->ctx);	/* best effort; not retried on WANT_POLL */
+	tls_free(cc->ctx);
+	tls_config_free(cc->tls_config);
+	if (cc->fd != -1)
+		close(cc->fd);
+	free(cc->hostname);
+	free(cc->request);
+	TAILQ_REMOVE(&cstr_conns, cc, entry);
+	free(cc);
+}
+
+static void
+cstr_conn_fail(struct imsgbuf *ib, struct cstr_conn *cc)
+{
+	cstr_send_close(ib, cc->id);
+	cstr_conn_free(cc);
 }
 
 /*
- * The constraint engine: forked once at startup (like the dns engine) and
- * long-lived, rather than fork+exec'd anew for every query.  It receives
- * one IMSG_CONSTRAINT_QUERY at a time on its pipe from the priv parent,
- * runs the HTTPS "Date:" fetch, and reports IMSG_CONSTRAINT_RESULT or
- * IMSG_CONSTRAINT_CLOSE{fail} back.
+ * Start an asynchronous HTTPS "Date:" fetch for one constraint query.
+ * Always inserts cc into cstr_conns (even on immediate failure) so that
+ * cstr_conn_fail()'s TAILQ_REMOVE is always valid.
+ */
+static void
+cstr_conn_start(struct imsgbuf *ib, uint32_t id, struct ntp_addr *a,
+    const char *name, const char *path, int synced)
+{
+	struct cstr_conn	*cc;
+	struct sockaddr		*sa = (struct sockaddr *)&a->ss;
+
+	if ((cc = calloc(1, sizeof(*cc))) == NULL)
+		fatal("calloc");
+	cc->id = id;
+	cc->fd = -1;
+	cc->synced = synced;
+	cc->deadline = getmonotime() + CONSTRAINT_SCAN_TIMEOUT;
+	TAILQ_INSERT_TAIL(&cstr_conns, cc, entry);
+
+	/*
+	 * Get the IP address as a string for SNI/logging.  This only
+	 * converts an address into a string and does not trigger any DNS
+	 * operation, so it is safe to be called without the dns pledge.
+	 */
+	if (getnameinfo(sa, SA_LEN(sa), cc->addr, sizeof(cc->addr), NULL, 0,
+	    NI_NUMERICHOST) != 0) {
+		log_warnx("%s: getnameinfo", __func__);
+		cstr_conn_fail(ib, cc);
+		return;
+	}
+	log_debug("constraint request to %s", cc->addr);
+
+	if ((cc->hostname = strdup(name ? name : cc->addr)) == NULL)
+		fatal("strdup");
+	if (asprintf(&cc->request,
+	    "HEAD %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
+	    path ? path : "/", cc->hostname) == -1)
+		fatal("asprintf");
+	cc->reqlen = strlen(cc->request);
+
+	if ((cc->tls_config = tls_config_new()) == NULL ||
+	    tls_config_set_ca_mem(cc->tls_config, cstr_ca, cstr_ca_len) == -1) {
+		log_warnx("%s: tls_config", __func__);
+		cstr_conn_fail(ib, cc);
+		return;
+	}
+	/*
+	 * We are trying to determine a constraint for time, so we do our
+	 * own certificate validity checking in cstr_conn_finish() against
+	 * the received Date:, since the automatic check is based on our
+	 * own (possibly inaccurate) wall clock.
+	 */
+	if (!synced) {
+		log_debug("constraints: using received time in certificate "
+		    "validation");
+		tls_config_insecure_noverifytime(cc->tls_config);
+	}
+	if ((cc->ctx = tls_client()) == NULL ||
+	    tls_configure(cc->ctx, cc->tls_config) == -1) {
+		log_warnx("%s: tls_configure: %s", __func__,
+		    cc->ctx ? tls_error(cc->ctx) : "tls_client");
+		cstr_conn_fail(ib, cc);
+		return;
+	}
+
+	if ((cc->fd = socket(sa->sa_family,
+	    SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)) == -1) {
+		log_warn("%s: socket", __func__);
+		cstr_conn_fail(ib, cc);
+		return;
+	}
+	if (connect(cc->fd, sa, SA_LEN(sa)) == -1 && errno != EINPROGRESS) {
+		log_debug("constraint: connect to %s: %s", cc->addr,
+		    strerror(errno));
+		cstr_conn_fail(ib, cc);
+		return;
+	}
+
+	cc->state = CSTR_CONNECTING;
+	cc->want = POLLOUT;
+}
+
+/*
+ * Scan cc->rbuf for a complete header line and check whether it is the
+ * Date: header we're after, consuming lines as we go.
+ * Returns 1 if cc->tm now holds a parsed Date:, 0 if more data is needed,
+ * -1 if the Date: header was malformed.
+ */
+static int
+cstr_conn_scan_date(struct cstr_conn *cc)
+{
+	char	*nl, *line, *p;
+	size_t	 linelen;
+
+	for (;;) {
+		if ((nl = memchr(cc->rbuf, '\n', cc->rlen)) == NULL)
+			return (0);	/* need more data */
+
+		line = cc->rbuf;
+		linelen = nl - cc->rbuf;
+		if (linelen > 0 && line[linelen - 1] == '\r')
+			linelen--;
+		line[linelen] = '\0';
+
+		if ((p = strchr(line, ' ')) != NULL && *p != '\0') {
+			*p++ = '\0';
+			if (strcasecmp("Date:", line) == 0) {
+				if (strptime(p, IMF_FIXDATE, &cc->tm) == NULL) {
+					log_warnx("constraint: %s: unsupported"
+					    " date format", cc->addr);
+					return (-1);
+				}
+				return (1);
+			}
+		}
+
+		/* not the line we want; drop it and keep scanning */
+		memmove(cc->rbuf, nl + 1, cc->rlen - (nl + 1 - cc->rbuf));
+		cc->rlen -= (nl + 1 - cc->rbuf);
+	}
+}
+
+/*
+ * cc->tm holds a Date: parsed from the response.  Validate the certificate
+ * against it (unless we're already synced and libtls checked it against
+ * our own clock), then report the result and free cc.
+ */
+static void
+cstr_conn_finish(struct imsgbuf *ib, struct cstr_conn *cc)
+{
+	time_t		 t, notbefore, notafter;
+	struct tm	*tmp;
+	char		 timebuf1[32], timebuf2[32];
+	struct timeval	 rectv, xmttv;
+	struct iovec	 iov[2];
+
+	cc->tm.tm_wday = -1;		/* sentinel for error, per timegm(3) */
+	t = timegm(&cc->tm);
+	if (t == -1 && cc->tm.tm_wday == -1) {
+		cstr_conn_fail(ib, cc);
+		return;
+	}
+
+	if (!cc->synced) {
+		notbefore = tls_peer_cert_notbefore(cc->ctx);
+		notafter = tls_peer_cert_notafter(cc->ctx);
+		if (t <= notbefore) {
+			if ((tmp = gmtime(&notbefore)) != NULL &&
+			    strftime(timebuf1, sizeof(timebuf1), X509_DATE,
+			    tmp) &&
+			    strftime(timebuf2, sizeof(timebuf2), X509_DATE,
+			    &cc->tm))
+				log_warnx("constraint: tls certificate not "
+				    "yet valid: %s: not before %s, now %s",
+				    cc->addr, timebuf1, timebuf2);
+			cstr_conn_fail(ib, cc);
+			return;
+		}
+		if (t >= notafter) {
+			if ((tmp = gmtime(&notafter)) != NULL &&
+			    strftime(timebuf1, sizeof(timebuf1), X509_DATE,
+			    tmp) &&
+			    strftime(timebuf2, sizeof(timebuf2), X509_DATE,
+			    &cc->tm))
+				log_warnx("constraint: tls certificate "
+				    "expired: %s: not after %s, now %s",
+				    cc->addr, timebuf1, timebuf2);
+			cstr_conn_fail(ib, cc);
+			return;
+		}
+	}
+
+	rectv.tv_sec = t;
+	rectv.tv_usec = 0;
+	xmttv = cc->when;
+
+	iov[0].iov_base = &rectv;
+	iov[0].iov_len = sizeof(rectv);
+	iov[1].iov_base = &xmttv;
+	iov[1].iov_len = sizeof(xmttv);
+	if (imsg_composev(ib, IMSG_CONSTRAINT_RESULT, cc->id, 0, -1, iov, 2)
+	    == -1)
+		fatal("%s: imsg_composev", __func__);
+
+	log_debug("constraint reply from %s", cc->addr);
+	cstr_conn_free(cc);
+}
+
+/*
+ * Drive one connection forward as far as it can go without blocking.
+ * Falls through the states in order on each call; returns (via cc->want)
+ * the event the caller's poll(2) should wait for next.
+ */
+static void
+cstr_conn_progress(struct imsgbuf *ib, struct cstr_conn *cc)
+{
+	int		error, ret;
+	socklen_t	len;
+
+	switch (cc->state) {
+	case CSTR_CONNECTING:
+		len = sizeof(error);
+		if (getsockopt(cc->fd, SOL_SOCKET, SO_ERROR, &error, &len)
+		    == -1)
+			error = errno;
+		if (error != 0) {
+			log_debug("constraint: connect to %s: %s", cc->addr,
+			    strerror(error));
+			cstr_conn_fail(ib, cc);
+			return;
+		}
+		if (tls_connect_socket(cc->ctx, cc->fd, cc->hostname) == -1) {
+			log_debug("constraint: tls_connect_socket %s: %s",
+			    cc->addr, tls_error(cc->ctx));
+			cstr_conn_fail(ib, cc);
+			return;
+		}
+		cc->state = CSTR_HANDSHAKE;
+		/* FALLTHROUGH */
+	case CSTR_HANDSHAKE:
+		ret = tls_handshake(cc->ctx);
+		if (ret == TLS_WANT_POLLIN) {
+			cc->want = POLLIN;
+			return;
+		}
+		if (ret == TLS_WANT_POLLOUT) {
+			cc->want = POLLOUT;
+			return;
+		}
+		if (ret == -1) {
+			log_debug("constraint: tls handshake %s: %s",
+			    cc->addr, tls_error(cc->ctx));
+			cstr_conn_fail(ib, cc);
+			return;
+		}
+		cc->state = CSTR_WRITE;
+		/* FALLTHROUGH */
+	case CSTR_WRITE:
+		while (cc->reqoff < cc->reqlen) {
+			ret = tls_write(cc->ctx, cc->request + cc->reqoff,
+			    cc->reqlen - cc->reqoff);
+			if (ret == TLS_WANT_POLLIN) {
+				cc->want = POLLIN;
+				return;
+			}
+			if (ret == TLS_WANT_POLLOUT) {
+				cc->want = POLLOUT;
+				return;
+			}
+			if (ret == -1) {
+				log_debug("constraint: tls write %s: %s",
+				    cc->addr, tls_error(cc->ctx));
+				cstr_conn_fail(ib, cc);
+				return;
+			}
+			cc->reqoff += ret;
+		}
+		cc->state = CSTR_READ;
+		cc->want = POLLIN;
+		/* FALLTHROUGH */
+	case CSTR_READ:
+		for (;;) {
+			if (cc->rlen >= sizeof(cc->rbuf) - 1) {
+				log_warnx("constraint: %s: response header "
+				    "too long", cc->addr);
+				cstr_conn_fail(ib, cc);
+				return;
+			}
+			ret = tls_read(cc->ctx, cc->rbuf + cc->rlen,
+			    sizeof(cc->rbuf) - 1 - cc->rlen);
+			if (ret == TLS_WANT_POLLIN) {
+				cc->want = POLLIN;
+				return;
+			}
+			if (ret == TLS_WANT_POLLOUT) {
+				cc->want = POLLOUT;
+				return;
+			}
+			if (ret == -1) {
+				log_debug("constraint: tls read %s: %s",
+				    cc->addr, tls_error(cc->ctx));
+				cstr_conn_fail(ib, cc);
+				return;
+			}
+			if (gettimeofday(&cc->when, NULL) == -1)
+				fatal("gettimeofday");
+			if (ret == 0) {
+				/* connection closed without a Date: header */
+				log_debug("constraint: %s: connection closed",
+				    cc->addr);
+				cstr_conn_fail(ib, cc);
+				return;
+			}
+			cc->rlen += ret;
+			cc->rbuf[cc->rlen] = '\0';
+
+			switch (cstr_conn_scan_date(cc)) {
+			case 1:
+				cstr_conn_finish(ib, cc);
+				return;
+			case -1:
+				cstr_conn_fail(ib, cc);
+				return;
+			}
+			/* 0: keep reading */
+		}
+	}
+}
+
+/* Handle one IMSG_CONSTRAINT_QUERY (or more) from the priv parent. */
+static int
+cstr_dispatch_imsg(struct imsgbuf *ib)
+{
+	struct imsg		 imsg;
+	struct ntp_addr_msg	 am;
+	uint8_t			*data;
+	char			*name, *path;
+	size_t			 mlen;
+	int			 n;
+
+	if (imsgbuf_read(ib) != 1)
+		return (-1);
+
+	for (;;) {
+		if ((n = imsgbuf_get(ib, &imsg)) == -1)
+			return (-1);
+		if (n == 0)
+			break;
+
+		if (imsg.hdr.type != IMSG_CONSTRAINT_QUERY) {
+			imsg_free(&imsg);
+			continue;
+		}
+
+		name = path = NULL;
+		mlen = imsg.hdr.len - IMSG_HEADER_SIZE;
+		if (mlen < sizeof(am)) {
+			log_warnx("%s: short IMSG_CONSTRAINT_QUERY", __func__);
+			cstr_send_close(ib, imsg.hdr.peerid);
+			imsg_free(&imsg);
+			continue;
+		}
+		memcpy(&am, imsg.data, sizeof(am));
+		if (mlen != sizeof(am) + am.namelen + am.pathlen) {
+			log_warnx("%s: malformed IMSG_CONSTRAINT_QUERY",
+			    __func__);
+			cstr_send_close(ib, imsg.hdr.peerid);
+			imsg_free(&imsg);
+			continue;
+		}
+
+		data = (uint8_t *)imsg.data + sizeof(am);
+		if (am.namelen) {
+			if ((name = get_string(data, am.namelen)) == NULL) {
+				log_warnx("invalid IMSG_CONSTRAINT_QUERY name");
+				cstr_send_close(ib, imsg.hdr.peerid);
+				imsg_free(&imsg);
+				continue;
+			}
+			data += am.namelen;
+		}
+		if (am.pathlen) {
+			if ((path = get_string(data, am.pathlen)) == NULL) {
+				log_warnx("invalid IMSG_CONSTRAINT_QUERY path");
+				free(name);
+				cstr_send_close(ib, imsg.hdr.peerid);
+				imsg_free(&imsg);
+				continue;
+			}
+		}
+
+		cstr_conn_start(ib, imsg.hdr.peerid, &am.a, name, path,
+		    am.synced);
+		free(name);
+		free(path);
+		imsg_free(&imsg);
+	}
+	return (0);
+}
+
+static volatile sig_atomic_t quit_cstr = 0;
+
+static void
+cstr_sighdlr(int sig)
+{
+	switch (sig) {
+	case SIGTERM:
+	case SIGINT:
+		quit_cstr = 1;
+		break;
+	}
+}
+
+/*
+ * The constraint engine, forked once at startup like the dns engine: runs
+ * any number of concurrent, non-blocking HTTPS "Date:" fetches, one per
+ * IMSG_CONSTRAINT_QUERY from the priv parent, reporting back
+ * IMSG_CONSTRAINT_RESULT or IMSG_CONSTRAINT_CLOSE{fail} per query.
  */
 void
 priv_constraint_child(struct ntpd_conf *nconf, struct passwd *pw)
 {
 	struct imsgbuf		 ibufst;
 	struct sigaction	 sa;
-	uint8_t			*ca;
-	size_t			 ca_len;
-	int			 i;
+	struct cstr_conn	*cc, *tcc;
+	struct pollfd		*pfd = NULL;
+	struct cstr_conn	**pfdconn = NULL;
+	void			*newp, *newp2;
+	u_int			 pfd_elms = 0, want_elms;
+	time_t			 now, deadline;
+	int			 nfds, ptimeout, i, j;
 
 	log_init(nconf->debug ? LOG_TO_STDERR : LOG_TO_SYSLOG, nconf->verbose,
 	    LOG_DAEMON);
@@ -409,8 +729,8 @@ priv_constraint_child(struct ntpd_conf *nconf, struct passwd *pw)
 		log_warn("could not set priority");
 
 	/* load CA certs before chroot() */
-	if ((ca = tls_load_file(tls_default_ca_cert_file(), &ca_len, NULL))
-	    == NULL)
+	if ((cstr_ca = tls_load_file(tls_default_ca_cert_file(), &cstr_ca_len,
+	    NULL)) == NULL)
 		fatalx("failed to load constraint ca");
 
 	if (chroot(pw->pw_dir) == -1)
@@ -426,19 +746,18 @@ priv_constraint_child(struct ntpd_conf *nconf, struct passwd *pw)
 	if (!nconf->debug && setsid() == -1)
 		fatal("setsid");
 
-	/* Reset all signal handlers except the ones we still want. */
+	/* Reset all signal handlers, then install the ones we want. */
 	memset(&sa, 0, sizeof(sa));
 	sigemptyset(&sa.sa_mask);
 	sa.sa_flags = SA_RESTART;
 	sa.sa_handler = SIG_DFL;
 	for (i = 1; i < _NSIG; i++)
 		sigaction(i, &sa, NULL);
-	/*
-	 * Unlike the old one-query-per-process design, this process now
-	 * outlives many TLS connections: ignore SIGPIPE so a peer resetting
-	 * a connection mid-write fails that query instead of the whole
-	 * engine.
-	 */
+	signal(SIGTERM, cstr_sighdlr);
+	signal(SIGINT, cstr_sighdlr);
+	signal(SIGHUP, SIG_IGN);
+	/* a peer resetting a connection mid-write should fail that query,
+	 * not this process */
 	signal(SIGPIPE, SIG_IGN);
 
 	if (pledge("stdio inet", NULL) == -1)
@@ -459,52 +778,88 @@ priv_constraint_child(struct ntpd_conf *nconf, struct passwd *pw)
 
 	setproctitle("constraint engine");
 
-	for (;;) {
-		struct cstr_query	 q;
-		static char		 addr[NI_MAXHOST];
-		struct timeval		 rectv, xmttv;
-		struct iovec		 iov[2];
-		void			*ctx;
-		int			 r;
+	while (quit_cstr == 0) {
+		now = getmonotime();
 
-		if ((r = cstr_read_query(&ibufst, &q)) == -1)
-			break;
-		if (r == 0)
-			continue;	/* malformed; nothing to report */
-
-		if (getnameinfo((struct sockaddr *)&q.addr->ss,
-		    SA_LEN((struct sockaddr *)&q.addr->ss),
-		    addr, sizeof(addr), NULL, 0, NI_NUMERICHOST) != 0) {
-			log_warnx("%s: getnameinfo", __func__);
-			cstr_send_close(&ibufst, q.id);
-			cstr_query_free(&q);
-			continue;
-		}
-		log_debug("constraint request to %s", addr);
-
-		ctx = httpsdate_query(addr, CONSTRAINT_PORT, q.name, q.path,
-		    ca, ca_len, &rectv, &xmttv, q.synced);
-		cstr_query_free(&q);
-
-		if (ctx == NULL) {
-			/* Abort with failure but without warning */
-			cstr_send_close(&ibufst, q.id);
-			continue;
+		/* Time out any connection that hasn't finished in time. */
+		TAILQ_FOREACH_SAFE(cc, &cstr_conns, entry, tcc) {
+			if (cc->deadline <= now) {
+				log_debug("constraint: %s: timed out",
+				    cc->addr);
+				cstr_conn_fail(&ibufst, cc);
+			}
 		}
 
-		iov[0].iov_base = &rectv;
-		iov[0].iov_len = sizeof(rectv);
-		iov[1].iov_base = &xmttv;
-		iov[1].iov_len = sizeof(xmttv);
-		if (imsg_composev(&ibufst, IMSG_CONSTRAINT_RESULT, q.id, 0,
-		    -1, iov, 2) == -1)
-			fatal("%s: imsg_composev", __func__);
-		if (imsgbuf_flush(&ibufst) == -1)
-			fatal("imsgbuf_flush");
+		want_elms = 1;
+		deadline = 0;
+		TAILQ_FOREACH(cc, &cstr_conns, entry) {
+			want_elms++;
+			if (deadline == 0 || cc->deadline < deadline)
+				deadline = cc->deadline;
+		}
 
-		httpsdate_free(ctx);
+		if (want_elms > pfd_elms) {
+			if ((newp = reallocarray(pfd, want_elms,
+			    sizeof(*pfd))) == NULL)
+				fatal("reallocarray");
+			pfd = newp;
+			if ((newp2 = reallocarray(pfdconn, want_elms,
+			    sizeof(*pfdconn))) == NULL)
+				fatal("reallocarray");
+			pfdconn = newp2;
+			pfd_elms = want_elms;
+		}
+
+		memset(pfd, 0, sizeof(*pfd) * pfd_elms);
+		pfd[0].fd = ibufst.fd;
+		pfd[0].events = POLLIN;
+		if (imsgbuf_queuelen(&ibufst) > 0)
+			pfd[0].events |= POLLOUT;
+		pfdconn[0] = NULL;
+
+		i = 1;
+		TAILQ_FOREACH(cc, &cstr_conns, entry) {
+			pfd[i].fd = cc->fd;
+			pfd[i].events = cc->want;
+			pfdconn[i] = cc;
+			i++;
+		}
+
+		ptimeout = deadline ?
+		    (int)MAXIMUM(1, deadline - now) * 1000 : INFTIM;
+
+		if ((nfds = poll(pfd, i, ptimeout)) == -1) {
+			if (errno != EINTR) {
+				log_warn("poll error");
+				quit_cstr = 1;
+			}
+			continue;
+		}
+
+		if (nfds > 0 && (pfd[0].revents & POLLOUT))
+			if (imsgbuf_write(&ibufst) == -1) {
+				log_warn("pipe write error (to parent)");
+				quit_cstr = 1;
+			}
+
+		if (nfds > 0 && (pfd[0].revents & POLLIN)) {
+			nfds--;
+			if (cstr_dispatch_imsg(&ibufst) == -1)
+				quit_cstr = 1;
+		}
+
+		for (j = 1; nfds > 0 && j < i; j++) {
+			if (pfd[j].revents == 0)
+				continue;
+			nfds--;
+			cstr_conn_progress(&ibufst, pfdconn[j]);
+		}
 	}
 
+	TAILQ_FOREACH_SAFE(cc, &cstr_conns, entry, tcc)
+		cstr_conn_free(cc);
+	free(pfd);
+	free(pfdconn);
 	imsgbuf_clear(&ibufst);
 	exit(0);
 }
@@ -808,275 +1163,6 @@ constraint_check(double val)
 	}
 
 	return (0);
-}
-
-struct httpsdate *
-httpsdate_init(const char *addr, const char *port, const char *hostname,
-    const char *path, const u_int8_t *ca, size_t ca_len, int synced)
-{
-	struct httpsdate	*httpsdate = NULL;
-
-	if ((httpsdate = calloc(1, sizeof(*httpsdate))) == NULL)
-		goto fail;
-
-	if (hostname == NULL)
-		hostname = addr;
-
-	if ((httpsdate->tls_addr = strdup(addr)) == NULL ||
-	    (httpsdate->tls_port = strdup(port)) == NULL ||
-	    (httpsdate->tls_hostname = strdup(hostname)) == NULL ||
-	    (httpsdate->tls_path = strdup(path)) == NULL)
-		goto fail;
-
-	if (asprintf(&httpsdate->tls_request,
-	    "HEAD %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
-	    httpsdate->tls_path, httpsdate->tls_hostname) == -1)
-		goto fail;
-
-	if ((httpsdate->tls_config = tls_config_new()) == NULL)
-		goto fail;
-	if (tls_config_set_ca_mem(httpsdate->tls_config, ca, ca_len) == -1)
-		goto fail;
-
-	/*
-	 * Due to the fact that we're trying to determine a constraint for time
-	 * we do our own certificate validity checking, since the automatic
-	 * version is based on our wallclock, which may well be inaccurate...
-	 */
-	if (!synced) {
-		log_debug("constraints: using received time in certificate validation");
-		tls_config_insecure_noverifytime(httpsdate->tls_config);
-	}
-
-	return (httpsdate);
-
- fail:
-	httpsdate_free(httpsdate);
-	return (NULL);
-}
-
-void
-httpsdate_free(void *arg)
-{
-	struct httpsdate *httpsdate = arg;
-	if (httpsdate == NULL)
-		return;
-	if (httpsdate->tls_ctx)
-		tls_close(httpsdate->tls_ctx);
-	tls_free(httpsdate->tls_ctx);
-	tls_config_free(httpsdate->tls_config);
-	free(httpsdate->tls_addr);
-	free(httpsdate->tls_port);
-	free(httpsdate->tls_hostname);
-	free(httpsdate->tls_path);
-	free(httpsdate->tls_request);
-	free(httpsdate);
-}
-
-int
-httpsdate_request(struct httpsdate *httpsdate, struct timeval *when, int synced)
-{
-	char	 timebuf1[32], timebuf2[32];
-	size_t	 outlen = 0, maxlength = CONSTRAINT_MAXHEADERLENGTH, len;
-	char	*line, *p, *buf;
-	time_t	 httptime, notbefore, notafter;
-	struct tm *tm;
-	ssize_t	 ret;
-
-	if ((httpsdate->tls_ctx = tls_client()) == NULL)
-		goto fail;
-
-	if (tls_configure(httpsdate->tls_ctx, httpsdate->tls_config) == -1)
-		goto fail;
-
-	/*
-	 * libtls expects an address string, which can also be a DNS name,
-	 * but we pass a pre-resolved IP address string in tls_addr so it
-	 * does not trigger any DNS operation and is safe to be called
-	 * without the dns pledge.
-	 */
-	if (tls_connect_servername(httpsdate->tls_ctx, httpsdate->tls_addr,
-	    httpsdate->tls_port, httpsdate->tls_hostname) == -1) {
-		log_debug("tls connect failed: %s (%s): %s",
-		    httpsdate->tls_addr, httpsdate->tls_hostname,
-		    tls_error(httpsdate->tls_ctx));
-		goto fail;
-	}
-
-	buf = httpsdate->tls_request;
-	len = strlen(httpsdate->tls_request);
-	while (len > 0) {
-		ret = tls_write(httpsdate->tls_ctx, buf, len);
-		if (ret == TLS_WANT_POLLIN || ret == TLS_WANT_POLLOUT)
-			continue;
-		if (ret == -1) {
-			log_warnx("tls write failed: %s (%s): %s",
-			    httpsdate->tls_addr, httpsdate->tls_hostname,
-			    tls_error(httpsdate->tls_ctx));
-			goto fail;
-		}
-		buf += ret;
-		len -= ret;
-	}
-
-	while ((line = tls_readline(httpsdate->tls_ctx, &outlen,
-	    &maxlength, when)) != NULL) {
-		line[strcspn(line, "\r\n")] = '\0';
-
-		if ((p = strchr(line, ' ')) == NULL || *p == '\0')
-			goto next;
-		*p++ = '\0';
-		if (strcasecmp("Date:", line) != 0)
-			goto next;
-
-		/*
-		 * Expect the date/time format as IMF-fixdate which is
-		 * mandated by HTTP/1.1 in the new RFC 7231 and was
-		 * preferred by RFC 2616.  Other formats would be RFC 850
-		 * or ANSI C's asctime() - the latter doesn't include
-		 * the timezone which is required here.
-		 */
-		if (strptime(p, IMF_FIXDATE,
-		    &httpsdate->tls_tm) == NULL) {
-			log_warnx("unsupported date format");
-			free(line);
-			goto fail;
-		}
-
-		free(line);
-		break;
- next:
-		free(line);
-	}
-	if (httpsdate->tls_tm.tm_year == 0)
-		goto fail;
-
-	/* If we are synced, we already checked the certificate validity */
-	if (synced)
-		return 0;
-
-	/*
-	 * Now manually check the validity of the certificate presented in the
-	 * TLS handshake, based on the time specified by the server's HTTP Date:
-	 * header.
-	 */
-	notbefore = tls_peer_cert_notbefore(httpsdate->tls_ctx);
-	notafter = tls_peer_cert_notafter(httpsdate->tls_ctx);
-	httpsdate->tls_tm.tm_wday = -1;		/* sentinel for error */
-	if ((httptime = timegm(&httpsdate->tls_tm)) == -1 &&
-	    httpsdate->tls_tm.tm_wday == -1)
-		goto fail;
-	if (httptime <= notbefore) {
-		if ((tm = gmtime(&notbefore)) == NULL)
-			goto fail;
-		if (strftime(timebuf1, sizeof(timebuf1), X509_DATE, tm) == 0)
-			goto fail;
-		if (strftime(timebuf2, sizeof(timebuf2), X509_DATE,
-		    &httpsdate->tls_tm) == 0)
-			goto fail;
-		log_warnx("tls certificate not yet valid: %s (%s): "
-		    "not before %s, now %s", httpsdate->tls_addr,
-		    httpsdate->tls_hostname, timebuf1, timebuf2);
-		goto fail;
-	}
-	if (httptime >= notafter) {
-		if ((tm = gmtime(&notafter)) == NULL)
-			goto fail;
-		if (strftime(timebuf1, sizeof(timebuf1), X509_DATE, tm) == 0)
-			goto fail;
-		if (strftime(timebuf2, sizeof(timebuf2), X509_DATE,
-		    &httpsdate->tls_tm) == 0)
-			goto fail;
-		log_warnx("tls certificate expired: %s (%s): "
-		    "not after %s, now %s", httpsdate->tls_addr,
-		    httpsdate->tls_hostname, timebuf1, timebuf2);
-		goto fail;
-	}
-
-	return (0);
-
- fail:
-	httpsdate_free(httpsdate);
-	return (-1);
-}
-
-void *
-httpsdate_query(const char *addr, const char *port, const char *hostname,
-    const char *path, const u_int8_t *ca, size_t ca_len,
-    struct timeval *rectv, struct timeval *xmttv, int synced)
-{
-	struct httpsdate	*httpsdate;
-	struct timeval		 when;
-	time_t			 t;
-
-	if ((httpsdate = httpsdate_init(addr, port, hostname, path,
-	    ca, ca_len, synced)) == NULL)
-		return (NULL);
-
-	if (httpsdate_request(httpsdate, &when, synced) == -1)
-		return (NULL);
-
-	httpsdate->tls_tm.tm_wday = -1;		/* sentinel for error */
-	t = timegm(&httpsdate->tls_tm);
-	if (t == -1 && httpsdate->tls_tm.tm_wday == -1) {
-		httpsdate_free(httpsdate);
-		return (NULL);
-	}
-
-	/* Report parsed Date: as "received time" */
-	rectv->tv_sec = t;
-	rectv->tv_usec = 0;
-
-	/* And add delay as "transmit time" */
-	xmttv->tv_sec = when.tv_sec;
-	xmttv->tv_usec = when.tv_usec;
-
-	return (httpsdate);
-}
-
-/* Based on SSL_readline in ftp/fetch.c */
-char *
-tls_readline(struct tls *tls, size_t *lenp, size_t *maxlength,
-    struct timeval *when)
-{
-	size_t i, len;
-	char *buf, *q, c;
-	ssize_t ret;
-
-	len = 128;
-	if ((buf = malloc(len)) == NULL)
-		fatal("Can't allocate memory for transfer buffer");
-	for (i = 0; ; i++) {
-		if (i >= len - 1) {
-			if ((q = reallocarray(buf, len, 2)) == NULL)
-				fatal("Can't expand transfer buffer");
-			buf = q;
-			len *= 2;
-		}
- again:
-		ret = tls_read(tls, &c, 1);
-		if (ret == TLS_WANT_POLLIN || ret == TLS_WANT_POLLOUT)
-			goto again;
-		if (ret == -1) {
-			/* SSL read error, ignore */
-			free(buf);
-			return (NULL);
-		}
-
-		if (maxlength != NULL && (*maxlength)-- == 0) {
-			log_warnx("maximum length exceeded");
-			free(buf);
-			return (NULL);
-		}
-
-		buf[i] = c;
-		if (c == '\n')
-			break;
-	}
-	*lenp = i;
-	if (gettimeofday(when, NULL) == -1)
-		fatal("gettimeofday");
-	return (buf);
 }
 
 char *
