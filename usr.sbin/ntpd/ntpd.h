@@ -200,9 +200,6 @@ struct constraint {
 	int				 senderrors;
 	enum client_state		 state;
 	u_int32_t			 id;
-	int				 fd;
-	pid_t				 pid;
-	struct imsgbuf			 ibuf;
 	time_t				 last;
 	time_t				 constraint;
 	int				 dnstries;
@@ -310,7 +307,6 @@ enum imsg_type {
 	IMSG_CONSTRAINT_QUERY,
 	IMSG_CONSTRAINT_RESULT,
 	IMSG_CONSTRAINT_CLOSE,
-	IMSG_CONSTRAINT_KILL,
 	IMSG_CTL_SHOW_STATUS,
 	IMSG_CTL_SHOW_PEERS,
 	IMSG_CTL_SHOW_PEERS_END,
@@ -386,11 +382,8 @@ int	 constraint_check(double);
 void	 constraint_msg_dns(u_int32_t, u_int8_t *, size_t);
 void	 constraint_msg_result(u_int32_t, u_int8_t *, size_t);
 void	 constraint_msg_close(u_int32_t, u_int8_t *, size_t);
-void	 priv_constraint_msg(u_int32_t, u_int8_t *, size_t, char *, int, char **);
-void	 priv_constraint_child(const char *, uid_t, gid_t);
-void	 priv_constraint_kill(u_int32_t);
-int	 priv_constraint_dispatch(struct pollfd *);
-void	 priv_constraint_check_child(pid_t, int);
+void	 priv_constraint_child(struct ntpd_conf *, struct passwd *);
+int	 priv_constraint_dispatch(void);
 char	*get_string(u_int8_t *, size_t);
 
 /* util.c */

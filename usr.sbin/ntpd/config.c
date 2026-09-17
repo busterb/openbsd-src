@@ -179,7 +179,6 @@ new_constraint(void)
 	if ((p = calloc(1, sizeof(struct constraint))) == NULL)
 		fatal("new_constraint calloc");
 	p->id = ++constraint_maxid;
-	p->fd = -1;
 
 	return (p);
 }

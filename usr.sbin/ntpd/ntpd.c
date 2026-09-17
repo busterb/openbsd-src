@@ -46,7 +46,7 @@ __dead void	usage(void);
 int		auto_preconditions(const struct ntpd_conf *);
 int		main(int, char *[]);
 void		check_child(void);
-int		dispatch_imsg(struct ntpd_conf *, char *, int, char **);
+int		dispatch_imsg(struct ntpd_conf *);
 void		reset_adjtime(void);
 int		ntpd_adjtime(double);
 void		ntpd_adjfreq(double, int);
@@ -62,10 +62,9 @@ void		show_sensor_msg(struct imsg *, int);
 volatile sig_atomic_t	 quit = 0;
 volatile sig_atomic_t	 reconfig = 0;
 volatile sig_atomic_t	 sigchld = 0;
-struct imsgbuf		*ibuf;
+struct imsgbuf		*ibuf;		/* pipe to the ntp engine */
+struct imsgbuf		*ibuf_cstr;	/* pipe to the constraint engine */
 int			 timeout = INFTIM;
-
-extern u_int		 constraint_cnt;
 
 const char		*showopt;
 
@@ -120,22 +119,20 @@ auto_preconditions(const struct ntpd_conf *cnf)
 
 #define POLL_MAX		8
 #define PFD_PIPE		0
-#define PFD_MAX			1
+#define PFD_CSTR		1
+#define PFD_MAX			2
 
 int
 main(int argc, char *argv[])
 {
 	struct ntpd_conf	 lconf;
-	struct pollfd		*pfd = NULL;
+	struct pollfd		 pfd[PFD_MAX];
 	pid_t			 pid;
 	const char		*conffile;
-	int			 ch, nfds, i, j;
-	int			 pipe_chld[2];
+	int			 ch, nfds;
+	int			 pipe_chld[2], pipe_cstr[2];
 	extern char		*__progname;
-	u_int			 pfd_elms = 0, new_cnt;
-	struct constraint	*cstr;
 	struct passwd		*pw;
-	void			*newp;
 	int			argc0 = argc, logdest;
 	char			**argv0 = argv, execpath[PATH_MAX];
 	char			*pname = NULL;
@@ -228,8 +225,7 @@ main(int argc, char *argv[])
 		else if (strcmp(NTPDNS_PROC_NAME, pname) == 0)
 			ntp_dns(&lconf, pw);
 		else if (strcmp(CONSTRAINT_PROC_NAME, pname) == 0)
-			priv_constraint_child(pw->pw_dir, pw->pw_uid,
-			    pw->pw_gid);
+			priv_constraint_child(&lconf, pw);
 		else
 			fatalx("%s: invalid process name '%s'", __func__,
 			    pname);
@@ -258,14 +254,19 @@ main(int argc, char *argv[])
 	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, PF_UNSPEC,
 	    pipe_chld) == -1)
 		fatal("socketpair");
+	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, PF_UNSPEC,
+	    pipe_cstr) == -1)
+		fatal("socketpair");
 
 	if (chdir("/") == -1)
 		fatal("chdir(\"/\")");
 
 	signal(SIGCHLD, sighdlr);
 
-	/* fork child process */
+	/* fork child processes */
 	start_child(NTP_PROC_NAME, pipe_chld[1], execpath, argc0, argv0);
+	start_child(CONSTRAINT_PROC_NAME, pipe_cstr[1], execpath, argc0,
+	    argv0);
 
 	log_procinit("[priv]");
 	readfreq();
@@ -274,6 +275,12 @@ main(int argc, char *argv[])
 	signal(SIGINT, sighdlr);
 	signal(SIGHUP, sighdlr);
 
+	/*
+	 * We keep no per-constraint state of our own: constraints are
+	 * driven by the ntp engine and handled by the persistent
+	 * constraint engine, and we merely relay imsgs between the two.
+	 * This just frees the constraints we parsed for auto_preconditions().
+	 */
 	constraint_purge();
 
 	if ((ibuf = malloc(sizeof(struct imsgbuf))) == NULL)
@@ -281,45 +288,30 @@ main(int argc, char *argv[])
 	if (imsgbuf_init(ibuf, pipe_chld[0]) == -1)
 		fatal(NULL);
 
-	constraint_cnt = 0;
+	if ((ibuf_cstr = malloc(sizeof(struct imsgbuf))) == NULL)
+		fatal(NULL);
+	if (imsgbuf_init(ibuf_cstr, pipe_cstr[0]) == -1)
+		fatal(NULL);
 
 	/*
-	 * Constraint processes are forked with certificates in memory,
-	 * then privdrop into chroot before speaking to the outside world.
+	 * Both children are forked above; we never exec again from here on.
 	 */
-	if (unveil(execpath, "x") == -1)
-		err(1, "unveil %s", execpath);
-	if (pledge("stdio settime proc exec", NULL) == -1)
+	if (pledge("stdio settime", NULL) == -1)
 		err(1, "pledge");
 
 	while (quit == 0) {
-		new_cnt = PFD_MAX + constraint_cnt;
-		if (new_cnt > pfd_elms) {
-			if ((newp = reallocarray(pfd, new_cnt,
-			    sizeof(*pfd))) == NULL) {
-				/* panic for now */
-				log_warn("could not resize pfd from %u -> "
-				    "%u entries", pfd_elms, new_cnt);
-				fatalx("exiting");
-			}
-			pfd = newp;
-			pfd_elms = new_cnt;
-		}
-
-		memset(pfd, 0, sizeof(*pfd) * pfd_elms);
+		memset(pfd, 0, sizeof(pfd));
 		pfd[PFD_PIPE].fd = ibuf->fd;
 		pfd[PFD_PIPE].events = POLLIN;
 		if (imsgbuf_queuelen(ibuf) > 0)
 			pfd[PFD_PIPE].events |= POLLOUT;
 
-		i = PFD_MAX;
-		TAILQ_FOREACH(cstr, &conf->constraints, entry) {
-			pfd[i].fd = cstr->fd;
-			pfd[i].events = POLLIN;
-			i++;
-		}
+		pfd[PFD_CSTR].fd = ibuf_cstr->fd;
+		pfd[PFD_CSTR].events = POLLIN;
+		if (imsgbuf_queuelen(ibuf_cstr) > 0)
+			pfd[PFD_CSTR].events |= POLLOUT;
 
-		if ((nfds = poll(pfd, i, timeout)) == -1)
+		if ((nfds = poll(pfd, PFD_MAX, timeout)) == -1)
 			if (errno != EINTR) {
 				log_warn("poll error");
 				quit = 1;
@@ -345,12 +337,21 @@ main(int argc, char *argv[])
 
 		if (nfds > 0 && pfd[PFD_PIPE].revents & POLLIN) {
 			nfds--;
-			if (dispatch_imsg(&lconf, execpath, argc0, argv0) == -1)
+			if (dispatch_imsg(&lconf) == -1)
 				quit = 1;
 		}
 
-		for (j = PFD_MAX; nfds > 0 && j < i; j++) {
-			nfds -= priv_constraint_dispatch(&pfd[j]);
+		if (nfds > 0 && (pfd[PFD_CSTR].revents & POLLOUT))
+			if (imsgbuf_write(ibuf_cstr) == -1) {
+				log_warn("pipe write error (to constraint "
+				    "engine)");
+				quit = 1;
+			}
+
+		if (nfds > 0 && pfd[PFD_CSTR].revents & POLLIN) {
+			nfds--;
+			if (priv_constraint_dispatch() == -1)
+				quit = 1;
 		}
 
 		if (sigchld) {
@@ -361,8 +362,9 @@ main(int argc, char *argv[])
 
 	signal(SIGCHLD, SIG_DFL);
 
-	/* Close socket and start shutdown. */
+	/* Close sockets and start shutdown. */
 	close(ibuf->fd);
+	close(ibuf_cstr->fd);
 
 	do {
 		if ((pid = wait(NULL)) == -1 &&
@@ -372,6 +374,8 @@ main(int argc, char *argv[])
 
 	imsgbuf_clear(ibuf);
 	free(ibuf);
+	imsgbuf_clear(ibuf_cstr);
+	free(ibuf_cstr);
 	log_info("Terminating");
 	return (0);
 }
@@ -382,17 +386,19 @@ check_child(void)
 	int	 status;
 	pid_t	 pid;
 
+	/*
+	 * Just reap zombies.  Neither the ntp engine nor the constraint
+	 * engine is tracked individually here: if either dies, its pipe to
+	 * us goes away and the main loop above notices via dispatch_imsg()
+	 * / priv_constraint_dispatch() returning -1, which shuts ntpd down.
+	 */
 	do {
 		pid = waitpid(WAIT_ANY, &status, WNOHANG);
-		if (pid <= 0)
-			continue;
-
-		priv_constraint_check_child(pid, status);
 	} while (pid > 0 || (pid == -1 && errno == EINTR));
 }
 
 int
-dispatch_imsg(struct ntpd_conf *lconf, char *execpath, int argc, char **argv)
+dispatch_imsg(struct ntpd_conf *lconf)
 {
 	struct imsg		 imsg;
 	int			 n, synced;
@@ -441,12 +447,11 @@ dispatch_imsg(struct ntpd_conf *lconf, char *execpath, int argc, char **argv)
 			timeout = INFTIM;
 			break;
 		case IMSG_CONSTRAINT_QUERY:
-			priv_constraint_msg(imsg.hdr.peerid,
-			    imsg.data, imsg.hdr.len - IMSG_HEADER_SIZE,
-			    execpath, argc, argv);
-			break;
-		case IMSG_CONSTRAINT_KILL:
-			priv_constraint_kill(imsg.hdr.peerid);
+			/* forward verbatim to the constraint engine */
+			if (imsg_compose(ibuf_cstr, IMSG_CONSTRAINT_QUERY,
+			    imsg.hdr.peerid, 0, -1, imsg.data,
+			    imsg.hdr.len - IMSG_HEADER_SIZE) == -1)
+				fatal("%s: imsg_compose", __func__);
 			break;
 		default:
 			break;
